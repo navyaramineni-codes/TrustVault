@@ -61,3 +61,53 @@
 - **Context:** Audit logs are high-value targets for malicious actors seeking to cover tracks after unauthorized actions or privilege escalation (CWE-778 / Log Repudiation).
 - **Decision:** Enforce append-only semantics directly in the Mongoose `AuditEvent` schema by rejecting updates in pre-hooks (`updateOne`, `updateMany`, `findOneAndUpdate`, `replaceOne`) and rejecting `save()` calls when `!this.isNew`. Configure schema timestamps to record only `createdAt` (omitting `updatedAt`).
 - **Consequences:** Audit records cannot be altered, replaced, or tampered with through the Mongoose model layer once written, ensuring tamper-resistant audit trails.
+
+---
+
+## ADR 009: Argon2id for Password Hashing over Bcrypt / Scrypt
+- **Status:** Accepted
+- **Context:** Password hashing must defend against modern offline cracking attacks employing specialized hardware (ASICs, FPGAs, and high-density GPU clusters). Standard algorithms like bcrypt are memory-light, making them vulnerable to massive parallel cracking on GPUs.
+- **Decision:** Utilize Argon2id (`@node-rs/argon2`), the winner of the Password Hashing Competition (PHC), which combines resistance to GPU cracking (via memory hardness) with resistance to side-channel cache-timing attacks.
+- **Consequences:** Provides state-of-the-art password protection. Prebuilt N-API Rust binaries eliminate fragile C++ compilation requirements on non-x86 developer environments (e.g. Windows ARM64).
+
+---
+
+## ADR 010: Stateful Session Storage via HttpOnly, SameSite Cookies & MongoDB Store
+- **Status:** Accepted
+- **Context:** Deciding between client-side stateless tokens (JWTs stored in browser `localStorage`) versus server-side sessions with signed cookies. `localStorage` is completely vulnerable to credential theft through Cross-Site Scripting (XSS), and stateless JWTs cannot be revoked immediately upon logout or credential compromise.
+- **Decision:** Implement server-side session management using `express-session` with sessions stored in MongoDB (`connect-mongo`). The session identifier is transported strictly via `HttpOnly`, `SameSite=Lax`, and `Secure` (in production) cookies.
+- **Consequences:** JavaScript execution cannot read the session cookie (`HttpOnly`), thwarting token theft via XSS. `SameSite=Lax` prevents unauthorized cross-origin credential transmission during Cross-Site Request Forgery (CSRF). Sessions can be revoked instantly on the server upon logout.
+
+---
+
+## ADR 011: Session Regeneration on Authentication (Session Fixation Prevention)
+- **Status:** Accepted
+- **Context:** In Session Fixation attacks (CWE-384), an attacker obtains or sets a valid session ID for a victim before they authenticate. If the application retains the same session ID after successful login, the attacker immediately inherits the authenticated session.
+- **Decision:** In `src/routes/auth.js`, execute `req.session.regenerate()` immediately upon successful credential verification before binding user identity attributes (`userId`, `role`, `email`) to the session.
+- **Consequences:** The session ID is replaced with a new cryptographically random token upon privilege change, rendering any pre-login session ID useless to an attacker.
+
+---
+
+## ADR 012: Constant-Time Password Verification against Non-Existent Users
+- **Status:** Accepted
+- **Context:** When handling login requests, if the application returns an error immediately upon failing to find an email in the database, the response returns in $<2\text{ms}$. If the user exists, computing the Argon2 hash comparison takes $\sim50-70\text{ms}$. Attackers measure this timing difference to enumerate valid user email addresses.
+- **Decision:** When a queried email is not found, execute a dummy Argon2 verification against a static pre-computed hash before returning a generic `401 Invalid email or password`.
+- **Consequences:** Equalizes response latency between existing and non-existing accounts, completely defeating timing-based user enumeration attacks (CWE-208 / CWE-200).
+
+---
+
+## ADR 013: Test-Driven Parametrized Authorization Matrix
+- **Status:** Accepted
+- **Context:** Document authorization systems often fail at boundary edge-cases (e.g., viewers attempting grant/delete actions, administrators implicitly bypassing ownership constraints, or deactivated users acting on cached sessions). Ad-hoc authorization unit testing frequently misses combinations.
+- **Decision:** Author a 35-case parametrized authorization test matrix in `tests/authz.test.js` prior to implementing `src/authz.js`. The matrix covers all permutations of actors (owner, viewer-edit, viewer-read, unrelated user, admin without grant, admin with ownership, unauthenticated anonymous, inactive owner, inactive viewer), documents (standard, admin-owned, missing/null), and actions (`read`, `edit`, `delete`, `grant`, invalid/arbitrary).
+- **Consequences:** Establishes an unambiguous, executable policy contract directly derived from `RULES.md` (Rules 2, 3, 4, 5, 7) that prevents privilege escalation regressions across all future refactorings.
+
+---
+
+## ADR 014: 404-Only Denial Policy for Document Authorization (Anti-Enumeration)
+- **Status:** Accepted
+- **Context:** Returning HTTP 403 Forbidden informs an unauthorized requester that a document exists at that ID/path, confirming the presence of confidential files or internal resource IDs (CWE-200 / Information Disclosure).
+- **Decision:** Codify in the authorization matrix that every denied access attempt—regardless of user role, token validity, or action attempted—returns an error with status 404 (Not Found), never 403 (Rule 3).
+- **Consequences:** Completely eliminates metadata enumeration and IDOR discovery vectors, ensuring unauthorized users cannot differentiate between a non-existent document and an existing confidential document they lack rights to view.
+
+
