@@ -70,6 +70,30 @@ app.use(
 // Double-submit CSRF protection using csrf-csrf
 app.use(doubleCsrfProtection);
 
+// Production Static Client Serving & SPA Routing (Pre-Route Navigation)
+const clientDistPath = path.resolve(__dirname, '../../client/dist');
+if (process.env.NODE_ENV !== 'test' && fs.existsSync(clientDistPath)) {
+  // Serve static assets (JS, CSS, icons, images)
+  app.use(express.static(clientDistPath));
+
+  // When a browser visits or refreshes an SPA route (e.g. /documents, /search, /admin, /login),
+  // intercept requests expecting text/html and serve index.html so React Router renders the UI.
+  app.use((req, res, next) => {
+    const isBrowserPageRequest =
+      req.method === 'GET' &&
+      req.headers.accept &&
+      req.headers.accept.includes('text/html') &&
+      !req.path.startsWith('/api') &&
+      !req.path.startsWith('/health') &&
+      !req.path.includes('/download');
+
+    if (isBrowserPageRequest) {
+      return res.sendFile(path.join(clientDistPath, 'index.html'));
+    }
+    next();
+  });
+}
+
 // Route mounting
 app.use('/health', healthRoutes);
 app.use('/auth', authRoutes);
@@ -83,18 +107,14 @@ app.use('/api/users', adminRoutes);
 app.use('/admin', adminDashboardRoutes);
 app.use('/api/admin', adminDashboardRoutes);
 
-// Production Static Client Serving & SPA Routing Fallback
-const clientDistPath = path.resolve(__dirname, '../../client/dist');
+// Fallback for any remaining unhandled GET requests
 if (process.env.NODE_ENV !== 'test' && fs.existsSync(clientDistPath)) {
-  app.use(express.static(clientDistPath));
-
   app.get('*', (req, res, next) => {
-    // If request accepts HTML and is not an API route, serve the React app
     if (
       req.accepts('html') &&
       !req.path.startsWith('/api') &&
       !req.path.startsWith('/health') &&
-      !req.path.startsWith('/documents/download')
+      !req.path.includes('/download')
     ) {
       return res.sendFile(path.join(clientDistPath, 'index.html'));
     }
