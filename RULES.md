@@ -1,0 +1,11 @@
+# TrustVault rules
+- Node 20, Express, MongoDB with Mongoose, React (Vite), Jest + Supertest. Docker Compose for Mongo.
+- Every document access goes through authorize(user, doc, action) in src/authz.js. Routes never query the documents collection directly.
+- Unauthorized access returns 404, never 403.
+- Viewers: read when granted read; read and edit when granted edit; delete and grant always denied. Only the owner can delete or grant. Admin has no automatic access to document contents.
+- Search is permission-filtered inside the database query, never in JS after fetching.
+- Every state change and every denied attempt writes an audit event via src/audit.js.
+- Files are stored outside the web root under a random UUID name.
+- Write tests first for auth, authz, audit and upload.
+- One task per prompt. Do not add features I did not ask for.
+- After every task, update the docs file I name, explaining WHY, not just what.
