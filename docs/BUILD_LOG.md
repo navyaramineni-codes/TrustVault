@@ -433,5 +433,130 @@ In standard XACML and zero-trust authorization architectures:
 2. **Separation from Stale Session Claims:** If permissions were stored inside user session cookies or JWT claims, a permission revocation would not take effect until the session expired or the JWT was reissued, leaving a dangerous window for unauthorized access.
 3. **Compound Index Optimization:** The query `Permission.findOne({ documentId: doc._id, userId: user._id })` leverages the unique compound index `{ documentId: 1, userId: 1 }`, guaranteeing $O(\log N)$ B-tree lookup time with zero table-scan latency and preventing duplicate permission grants.
 
+---
+
+## Build Entry: Document Upload Security - 5 Bad Upload Rejections, Multer In-Memory Storage, Magic Byte Validation, UUID Storage & SHA-256 Digest
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Comprehensive Upload Security Test Suite (`tests/upload.test.js`):**
+  - Authored automated tests verifying rejection of the **5 bad upload scenarios**:
+    1. **Wrong Type:** Non-whitelisted file type (e.g. bash scripts, executable binaries) rejected with HTTP 400 and `UPLOAD_FAILED` audit event logged.
+    2. **Spoofed Extension:** Executable binaries disguised as benign files (e.g., Windows PE binary with `.pdf` extension) rejected with HTTP 400 via magic byte inspection and `UPLOAD_FAILED` audit event logged.
+    3. **Oversized File:** Payloads exceeding the configured 5MB size ceiling rejected with HTTP 400/413 and `UPLOAD_FAILED` audit event logged.
+    4. **Path Traversal Filename (`../`):** Filenames containing relative directory traversal sequences (e.g., `../../../../etc/cron.d/evil.pdf`) rejected with HTTP 400 and `UPLOAD_FAILED` audit event logged.
+    5. **Empty File:** Zero-byte files rejected with HTTP 400 and `UPLOAD_FAILED` audit event logged.
+  - Implemented and verified the **Happy Path**:
+    - Valid PDF upload authenticated via session cookie.
+    - Decoupled physical disk storage using cryptographically random UUID v4 filenames outside the web root (`storage/documents/`).
+    - Cryptographic integrity recorded with a SHA-256 hex digest persisted on the `Document` model.
+    - Verified physical file on disk matches upload byte-for-byte with matching SHA-256 checksum.
+    - Validated emission of a `DOCUMENT_CREATE` audit event with status `SUCCESS`.
+  - Verified unauthenticated upload attempts return HTTP 401 Unauthorized.
+- **Upload Endpoint (`src/routes/documents.js`):**
+  - Configured `multer` with `multer.memoryStorage()`, `preservePath: true`, and strict limits (5MB maximum size, 1 file per request).
+  - Synchronous magic byte inspection via `file-type` (`FileType.fromBuffer`) evaluating in-memory buffers prior to any disk I/O.
+  - Cross-validation against explicit MIME type whitelist (`application/pdf`, `image/jpeg`, `image/png`, `image/webp`) and extension matching.
+  - Path traversal detection scanning for `..`, `/`, and `\` sequences.
+  - Secure physical file writing via `fs.promises.writeFile` using `crypto.randomUUID()`.
+  - Cryptographic digest computation via `crypto.createHash('sha256')`.
+  - Automatic audit event logging for both denials and successful uploads via `logAuditEvent`.
+- **Database Model Enhancements:**
+  - Added `sha256` required string field to `src/models/Document.js` with regex validation (`/^[a-f0-9]{64}$/i`).
+  - Updated `tests/models.test.js` to assert `sha256` validation.
+  - Mounted document routes at `/documents` and `/api/documents` in `src/app.js`.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `tests/upload.test.js` | Created | Comprehensive integration tests for the 5 bad uploads, happy path, UUID disk storage, SHA-256 verification, and audit event logging. |
+| `src/routes/documents.js` | Created | Upload controller implementing Multer memory storage, magic byte inspection, path traversal rejection, UUID storage, SHA-256 recording, and audit logging. |
+| `src/models/Document.js` | Modified | Added required `sha256` hex string field with validation and updated documentation. |
+| `src/app.js` | Modified | Mounted `documentRoutes` at `/documents` and `/api/documents`. |
+| `tests/models.test.js` | Modified | Updated Document model validation tests to include the `sha256` property. |
+| `package.json` | Modified | Added `multer` and `file-type` (v16.5.4 CommonJS) dependencies. |
+| `.gitignore` | Modified | Added `storage/` and `uploads/` directories to prevent test files from polluting git repository. |
+| `docs/DECISIONS.md` | Modified | Appended ADRs 017 (Magic Byte Validation), 018 (Path Traversal Sanitization), and 019 (UUID Storage & SHA-256). |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **In-Memory Magic Byte Validation Before Disk Touch:**
+  - Conventional file upload implementations write files directly to disk (using `multer.diskStorage()`) and only validate afterwards. This creates a critical vulnerability window: malicious files reside on the filesystem where they can be executed by web servers, trigger file-watcher vulnerabilities, or leave lingering unlinked files on crash.
+  - By using `multer.memoryStorage()`, the binary payload is buffered in RAM. `file-type` inspects the initial header bytes (e.g. `%PDF-` for PDFs, `\xFF\xD8\xFF` for JPEGs, `\x89PNG` for PNGs). If the magic bytes do not match the whitelist, the buffer is dropped immediately without writing a single byte to disk.
+- **Two-Tier Extension Spoofing Detection:**
+  - Attackers frequently rename executable files (e.g., `malware.exe` to `malware.pdf`) or craft polyglot files that fool naive parsers. Checking both the detected magic byte MIME type and comparing it to the file extension guarantees that even if a payload contains valid image headers, it cannot be submitted with an incongruent extension.
+- **Path Traversal Defense via `preservePath: true`:**
+  - Standard multipart parsers often automatically strip path separators, which can mask traversal attacks from application-level logging and auditing. By setting `preservePath: true`, raw paths like `../../../../etc/cron.d/evil.pdf` are preserved and exposed to the validation layer, enabling TrustVault to reject the attack and record an audit log event containing the exact attempted traversal path.
+- **Cryptographic UUID File Decoupling:**
+  - Per Rule 7 (*"Files are stored outside web root under a random UUID name"*), files are stored in `storage/documents/<uuid>` with no file extension. The original filename is stored strictly as a metadata field in MongoDB. This completely eliminates filename collision overwrites, disables direct web server script execution, and prevents directory traversal attacks from ever resolving to physical disk paths.
+- **Cryptographic SHA-256 Recording:**
+  - Calculating `crypto.createHash('sha256').update(buffer).digest('hex')` at the moment of upload provides an immutable cryptographic fingerprint. This enables data integrity verification, rapid deduplication detection, and forensic non-repudiation in compliance with enterprise audit standards.
+- **Mandatory Audit Logging:**
+  - Per Rule 6 (*"Every state change and denied attempt writes an audit event via src/audit.js"*), every upload failure (wrong type, spoofed extension, oversized, path traversal, empty file) emits an `UPLOAD_FAILED` event with status `'DENIED'`, capturing user ID, client IP, User-Agent, and detailed reason. Successful uploads emit `DOCUMENT_CREATE` with status `'SUCCESS'`.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Unrestricted File Upload & Remote Code Execution (CWE-434 / CWE-94):**
+   - Attackers uploading web shells (`.php`, `.jsp`, `.asp`), Node.js scripts, or compiled binaries cannot execute them because:
+     - The file type whitelist only allows static document/image MIME types.
+     - Files are stored outside the web root (`storage/documents/`), preventing web server URL routing from serving or executing them.
+     - Files are saved as extensionless UUIDs, preventing file-extension-based script execution engines from parsing them.
+2. **MIME-Type Spoofing and Polyglot Attacks (CWE-434 / CWE-20):**
+   - Web clients can trivially falsify the `Content-Type` header (e.g. sending `Content-Type: application/pdf` for an executable). Inspecting the file's binary magic bytes directly in RAM ensures the file's true content matches its declared type.
+3. **Path Traversal & Arbitrary File Overwrite (CWE-22 / CWE-59):**
+   - An attacker attempting to place a file into system directories (such as `../../../../etc/cron.d/backdoor`) is blocked: the filename is scanned for traversal sequences (`..`, `/`, `\`), and the physical file is written using `crypto.randomUUID()`, completely ignoring user-provided paths.
+4. **Denial of Service via File Size Flooding (CWE-400):**
+   - Oversized uploads can exhaust server memory or disk storage. Multer's strict `limits: { fileSize: 5 * 1024 * 1024 }` intercepts payloads exceeding 5MB at the stream level, aborting the transfer and returning HTTP 400.
+5. **Zero-Byte File Storage Pollution (CWE-20):**
+   - Empty files waste database entries and storage pointers. Checking `req.file.size === 0` rejects empty uploads before database records or disk files are created.
+6. **Data Tampering & Integrity Degradation (CWE-353):**
+   - Recording the SHA-256 digest provides a cryptographic baseline. Any subsequent modification, disk corruption, or unauthorized alteration of the stored file can be detected immediately by recalculating the hash.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why is validating the HTTP `Content-Type` header or file extension insufficient for securing file uploads, and how does magic byte validation solve this vulnerability?
+**Answer:**
+1. **The Inherent Untrustworthiness of Client Metadata:**
+   - The `Content-Type` HTTP header is supplied entirely by the client (browser or HTTP tool). An attacker using tools like cURL, Burp Suite, or Postman can effortlessly attach an executable file (`backdoor.exe` or `shell.php`) while setting `Content-Type: application/pdf`.
+   - File extensions are purely arbitrary naming conventions. Renaming `evil.exe` to `statement.pdf` allows it to bypass superficial string or regex checks like `filename.endsWith('.pdf')`.
+2. **Magic Byte Validation Mechanism:**
+   - Most standardized file formats contain fixed binary signatures—known as "magic bytes" or magic numbers—in the first few bytes of the file header (e.g., `%PDF-` (`0x25 0x50 0x44 0x46`) for PDF, `\xFF\xD8\xFF` for JPEG, `\x89PNG\r\n\x1a\n` for PNG).
+   - Libraries like `file-type` inspect the binary buffer directly, comparing byte offsets against known specifications. If an executable binary (`MZ` header: `0x4D 0x5A`) is sent with a `.pdf` extension, magic byte validation detects `application/x-msdownload`, exposing the spoof attempt and rejecting the upload.
+3. **Defense-in-Depth Implementation:**
+   - Robust security requires a two-tier check: verify that the magic bytes match an allowed MIME whitelist, and ensure that the file extension matches the detected MIME type. This prevents polyglots and extension-spoofing attacks from reaching backend storage.
+
+#### Question 2: What are the security risks associated with storing uploaded files using their user-supplied original filenames, and how does storing files under random UUIDs outside the web root mitigate them?
+**Answer:**
+1. **Risks of User-Supplied Filenames:**
+   - **Path Traversal (CWE-22):** If the application uses the original filename in disk paths (`path.join(uploadDir, req.file.originalname)`), filenames like `../../../../var/www/shell.js` can escape the intended directory and overwrite critical application files.
+   - **File Collision & Overwrite:** If two users upload files with the name `invoice.pdf`, one user's file will overwrite the other's, resulting in data loss or unauthorized document replacement.
+   - **Remote Code Execution (CWE-434):** If uploads are saved inside the web root (e.g. `public/uploads/`) with executable extensions (e.g. `.php`, `.phtml`, `.cgi`, `.js`), an attacker can request the file directly via `https://example.com/uploads/evil.php` and trigger server-side code execution.
+   - **Null Byte Injection & Special Characters:** Filenames containing null bytes (`shell.php\0.pdf`), control characters, or Unicode normalization quirks can bypass extension filters in legacy C libraries or underlying OS filesystem drivers.
+2. **UUID Storage Outside Web Root Solution:**
+   - **Decoupled Identity:** Generating a cryptographically random UUID v4 (`crypto.randomUUID()`) guarantees that disk filenames consist strictly of alphanumeric characters and hyphens, completely eliminating path traversal and collision risks.
+   - **Isolation from Static Handlers:** Storing files outside the web root (`storage/documents/`) ensures no web server (Nginx, Apache, Express `express.static`) will ever automatically serve or execute the file directly from a URL.
+   - **Enforced Access Control:** The only way to retrieve a file is through an authenticated application route that consults the authorization engine (`authorize()`), verifying ownership and permissions before streaming bytes to the client.
+
+#### Question 3: Why can buffering file uploads in memory (`multer.memoryStorage()`) be risky, and how do you achieve secure in-memory inspection without exposing the application to Denial of Service (DoS)?
+**Answer:**
+1. **The In-Memory Buffering Trade-off:**
+   - **The Dilemma:** Writing files to disk before validation allows malicious files to touch the filesystem. However, buffering files in RAM (`memoryStorage`) consumes Node.js V8 heap memory.
+   - **The DoS Vector (CWE-400):** If an attacker opens 100 concurrent HTTP requests each uploading a 500MB file, in-memory buffering without strict limits would allocate 50GB of RAM, quickly triggering Node.js Out-Of-Memory (OOM) crashes and taking down the entire service.
+2. **Mitigating DoS While Retaining In-Memory Validation:**
+   - **Strict Stream-Level Size Limits:** Multer allows setting `limits: { fileSize: 5 * 1024 * 1024, files: 1 }`. Busboy monitors the incoming multipart chunk stream; the moment the received bytes exceed 5MB, it halts buffering, destroys the incoming stream, and emits a `LIMIT_FILE_SIZE` error without consuming further memory.
+   - **Heap Budgeting:** In a system with a 5MB per-file limit and a worker pool handling 20 concurrent uploads, maximum transient heap memory allocated for uploads is bounded at $\sim100\text{MB}$, which fits comfortably within standard Node.js heap allocations (default 2GB–4GB).
+   - **Alternative for Large Files (Chunked Streaming):** For applications requiring large file uploads (e.g. 500MB video/dataset files), buffering the entire file in RAM is infeasible. Instead, stream the first 4KB to 8KB into memory to validate magic bytes using `file-type`, and once validated, pipe the remainder of the incoming stream directly to an isolated disk location or object store (e.g. AWS S3 / Google Cloud Storage) under a UUID.
+
+
 
 

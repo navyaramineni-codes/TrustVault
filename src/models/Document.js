@@ -36,6 +36,12 @@ const documentSchema = new mongoose.Schema(
       required: [true, 'File size in bytes is required'],
       min: [0, 'File size cannot be negative'],
     },
+    sha256: {
+      type: String,
+      required: [true, 'SHA-256 checksum is required'],
+      trim: true,
+      index: true,
+    },
     ownerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

@@ -68,7 +68,7 @@ describe('Mongoose Data Models Validation & Security Constraints', () => {
   });
 
   describe('Document Model', () => {
-    it('should require title, fileStorageName, originalFileName, mimeType, sizeBytes, and ownerId', () => {
+    it('should require title, fileStorageName, originalFileName, mimeType, sizeBytes, sha256, and ownerId', () => {
       const doc = new Document({});
       const error = doc.validateSync();
 
@@ -77,6 +77,7 @@ describe('Mongoose Data Models Validation & Security Constraints', () => {
       expect(error.errors.originalFileName).toBeDefined();
       expect(error.errors.mimeType).toBeDefined();
       expect(error.errors.sizeBytes).toBeDefined();
+      expect(error.errors.sha256).toBeDefined();
       expect(error.errors.ownerId).toBeDefined();
     });
 
@@ -87,6 +88,7 @@ describe('Mongoose Data Models Validation & Security Constraints', () => {
         originalFileName: 'report.pdf',
         mimeType: 'application/pdf',
         sizeBytes: -10,
+        sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
         ownerId: new mongoose.Types.ObjectId(),
       });
       const error = doc.validateSync();

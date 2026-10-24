@@ -4,6 +4,7 @@ const session = require('express-session');
 const { MongoStore } = require('connect-mongo');
 const healthRoutes = require('./routes/health');
 const authRoutes = require('./routes/auth');
+const documentRoutes = require('./routes/documents');
 
 const app = express();
 
@@ -50,6 +51,8 @@ app.use(
 app.use('/health', healthRoutes);
 app.use('/auth', authRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/documents', documentRoutes);
+app.use('/api/documents', documentRoutes);
 
 // 404 handler for undefined endpoints
 app.use((req, res) => {

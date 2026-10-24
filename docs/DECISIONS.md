@@ -126,5 +126,30 @@
 - **Decision:** Channel all authorization rejections through an internal `deny(user, doc, action, reason)` function in `src/authz.js`. This function asynchronously emits an `ACCESS_DENIED` audit event with actor, document, action, status `'DENIED'`, and rationale, then immediately throws an `AuthorizationError` with `status: 404` and `statusCode: 404`.
 - **Consequences:** Guarantees that no denial path escapes security audit logging, completely eliminates duplicate audit code across controllers, and strictly maintains the 404 status code guarantee.
 
+---
+
+## ADR 017: Two-Tier In-Memory File Type Validation via Magic Bytes & Extension Whitelisting
+- **Status:** Accepted
+- **Context:** Relying on client-supplied `Content-Type` headers or file extensions alone allows attackers to upload executable binaries (PE, ELF, Mach-O), shell scripts, or polyglots disguised with benign extensions (`.pdf`, `.png`). Writing untrusted files to disk prior to verification creates Time-of-Check to Time-of-Use (TOCTOU) race conditions and disk pollution vectors.
+- **Decision:** Buffer file uploads in RAM using `multer.memoryStorage()` subject to a 5MB size limit. Validate files via `file-type` by inspecting binary magic bytes in the memory buffer against an explicit MIME whitelist (`application/pdf`, `image/jpeg`, `image/png`, `image/webp`). Cross-reference the detected MIME type against the file's extension to detect and reject extension spoofing before saving to disk.
+- **Consequences:** Eliminates CWE-434 (Unrestricted Upload of File with Dangerous Type). Invalid or spoofed files never touch the filesystem, reducing I/O overhead and preventing malicious payloads from ever reaching disk.
+
+---
+
+## ADR 018: Strict Filename Path Traversal Sanitization with Multer Path Preservation
+- **Status:** Accepted
+- **Context:** Attackers exploit directory traversal sequences (`../`, `..\`) in multipart filename headers to overwrite arbitrary operating system files (e.g. `/etc/cron.d/`, system startup scripts) or escape designated storage roots (CWE-22). Some multipart parsers strip path prefixes automatically, but relying on implicit behavior without explicit validation leaves systems vulnerable when parsing logic differs across proxies or runtimes.
+- **Decision:** Enable `preservePath: true` in Multer configuration to expose raw client-supplied paths. Explicitly validate `req.file.originalname` to reject any occurrence of `..`, `/`, or `\`, logging an `UPLOAD_FAILED` audit event with status `DENIED` and returning HTTP 400.
+- **Consequences:** Enforces defense-in-depth protection against Path Traversal and Arbitrary File Overwrite. All traversal attempts are recorded in immutable audit logs for threat monitoring.
+
+---
+
+## ADR 019: Decoupled UUID-Based File Storage Outside Web Root with SHA-256 Cryptographic Fingerprint
+- **Status:** Accepted
+- **Context:** Storing uploaded files using their original filenames or inside web-accessible document roots (`public/`, `static/`) enables Remote Code Execution (RCE) via direct URL invocation, filename collision overwrites, and metadata leaks. Additionally, lacking cryptographic integrity records allows silent tampering or corruption of stored documents.
+- **Decision:** Persist files strictly inside a dedicated directory outside the web root (`storage/documents`), generating a cryptographically random UUID v4 (`crypto.randomUUID()`) as the physical filename with no extension. Calculate and store a SHA-256 cryptographic digest (`crypto.createHash('sha256')`) along with metadata in the `Document` database record.
+- **Consequences:** Stored files cannot be directly executed by web servers or reached via static URL routing. Disk overwrites from identical user filenames are mathematically impossible. The SHA-256 fingerprint provides cryptographic non-repudiation and integrity verification.
+
+
 
 
