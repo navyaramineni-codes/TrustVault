@@ -9,6 +9,21 @@ let server;
 async function startServer() {
   try {
     await connectDB();
+
+    // Auto-seed initial demo accounts on fresh cloud deployment if database has no users
+    if (process.env.NODE_ENV !== 'test') {
+      try {
+        const { User } = require('./models');
+        const userCount = await User.countDocuments();
+        if (userCount === 0) {
+          console.log('[Server] Fresh database detected. Auto-seeding initial demo accounts...');
+          const { seedDatabase } = require('../scripts/seed');
+          await seedDatabase(false);
+        }
+      } catch (seedErr) {
+        console.warn('[Server] Initial seed check note:', seedErr.message);
+      }
+    }
   } catch (error) {
     console.warn('[Server] Initial MongoDB connection failed. Running server in degraded state; will retry on subsequent operations.');
   }

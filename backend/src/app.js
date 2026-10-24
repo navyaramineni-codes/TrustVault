@@ -1,3 +1,5 @@
+const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
@@ -80,6 +82,25 @@ app.use('/users', adminRoutes);
 app.use('/api/users', adminRoutes);
 app.use('/admin', adminDashboardRoutes);
 app.use('/api/admin', adminDashboardRoutes);
+
+// Production Static Client Serving & SPA Routing Fallback
+const clientDistPath = path.resolve(__dirname, '../../client/dist');
+if (process.env.NODE_ENV !== 'test' && fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+
+  app.get('*', (req, res, next) => {
+    // If request accepts HTML and is not an API route, serve the React app
+    if (
+      req.accepts('html') &&
+      !req.path.startsWith('/api') &&
+      !req.path.startsWith('/health') &&
+      !req.path.startsWith('/documents/download')
+    ) {
+      return res.sendFile(path.join(clientDistPath, 'index.html'));
+    }
+    next();
+  });
+}
 
 // 404 handler for undefined endpoints
 app.use((req, res) => {
