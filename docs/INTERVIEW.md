@@ -18,7 +18,7 @@
 ## Question 1: How does `authorize()` work?
 
 ### 60-Second Spoken Pitch (Say Out Loud):
-> *"In TrustVault, `authorize(user, doc, action)` serves as our centralized Policy Decision Point (PDP) in `src/authz.js`. Instead of scattering authorization checks across routes or controllers, every single document read, edit, delete, or grant request must dispatch through this single function.*
+> *"In TrustVault, `authorize(user, doc, action)` serves as our centralized Policy Decision Point (PDP) in `backend/src/authz.js`. Instead of scattering authorization checks across routes or controllers, every single document read, edit, delete, or grant request must dispatch through this single function.*
 >
 > *First, it validates the action and ensures the document has not been soft-deleted—if `doc.deletedAt` is set, it immediately denies access. Next, it verifies that the user is authenticated and active. If the user owns the document, they receive immediate authorization for all actions. If they are not the owner, the function enforces strict constraints: delete and grant actions are rejected immediately because only owners can delete or grant. Furthermore, system administrators have zero automatic access to document contents per our Separation of Duties principle.*
 >
@@ -31,7 +31,7 @@
 #### 1. The Centralized Policy Decision Point Pattern (Rule 2)
 In distributed MVC architectures, authorization vulnerabilities (such as IDOR or broken object-level authorization) frequently arise when access control logic is duplicated or inconsistently implemented across different controllers. 
 
-TrustVault enforces **Rule 2**: *Routes never query the `Document` collection directly.* All HTTP controllers dispatch requests to `src/services/documentService.js`, which uniformly calls `authorize(user, doc, action)` in `src/authz.js` before returning data or mutating state.
+TrustVault enforces **Rule 2**: *Routes never query the `Document` collection directly.* All HTTP controllers dispatch requests to `backend/src/services/documentService.js`, which uniformly calls `authorize(user, doc, action)` in `backend/src/authz.js` before returning data or mutating state.
 
 ```
 Incoming Request
@@ -40,10 +40,10 @@ Incoming Request
 Express Route Handler (e.g. GET /documents/:id)
        │
        ▼
-Document Service (src/services/documentService.js)
+Document Service (backend/src/services/documentService.js)
        │
        ▼
-Policy Decision Point: authorize(user, doc, action) in src/authz.js
+Policy Decision Point: authorize(user, doc, action) in backend/src/authz.js
        ├─► Validates Action & Soft-Delete (deletedAt)
        ├─► Validates User Authentication & Active Status
        ├─► Evaluates Ownership (Owner has full rights)
@@ -59,7 +59,7 @@ Execute Operation   logAuditEvent(ACCESS_DENIED)
 & Log SUCCESS       throw new AuthorizationError(404)
 ```
 
-#### 2. Detailed Step-by-Step Pipeline in `src/authz.js`
+#### 2. Detailed Step-by-Step Pipeline in `backend/src/authz.js`
 
 1. **Action Validation (`SUPPORTED_ACTIONS`):**
    - Restricts `action` strictly to the immutable frozen array: `['read', 'edit', 'delete', 'grant']`. Unsupported actions immediately fail.
@@ -94,7 +94,7 @@ Execute Operation   logAuditEvent(ACCESS_DENIED)
 >
 > *When an API returns HTTP 403 Forbidden, it confirms to an attacker that the resource ID exists, that the endpoint is active, and that they've simply hit a permission boundary. This allows attackers to enumerate valid document IDs, map internal company structure, or confirm the presence of hidden administrative portals.*
 >
-> *By returning HTTP 404 Not Found, an unauthorized request for another user's document looks completely identical to a request for a completely bogus, non-existent UUID. The attacker learns nothing: they cannot tell if the file exists, who owns it, or whether they guessed a valid ID. It transforms an Insecure Direct Object Reference (IDOR) reconnaissance surface into an opaque black box."*
+> *By returning HTTP 404 Not Found, an unauthorized request for another user's document looks completely identical to a request for a completely bogus, non-existent UUID. The attacker learns nothing: they cannot tell if the file exists, who owns it, or whether they guessed a valid ID. It transforms an Insecure Direct Object Reference (IDOR) reconnaissance surface into an opaque black box. Furthermore, our React frontend strictly reflects this by rendering the identical 'Not Found' screen whenever any 404 is received, ensuring zero UI leakage."*
 
 ---
 
@@ -116,10 +116,10 @@ While semantically standard, returning `403` in a multi-tenant or confidential s
    - Confirming the existence of confidential filenames or document IDs gives adversaries intelligence for targeted spear-phishing (e.g. knowing a confidential acquisition project code exists).
 
 #### 2. Universal 404 Cloaking Gate (Rule 3)
-TrustVault implements universal 404 cloaking at both the route middleware level and the authorization engine level:
+TrustVault implements universal 404 cloaking across all system tiers:
 
 ```javascript
-// src/authz.js
+// backend/src/authz.js
 class AuthorizationError extends Error {
   constructor(message = 'Not Found') {
     super(message);
@@ -131,15 +131,16 @@ class AuthorizationError extends Error {
 ```
 
 - **Resource Cloaking:** If User B attempts to read, download, edit, or delete User A's document, TrustVault returns HTTP 404. User B cannot distinguish User A's real document from an imaginary document ID.
-- **Administrative Surface Cloaking:** In `src/routes/admin.js` and `src/routes/adminDashboard.js`, the `requireAdmin` middleware checks user role. If the requester is unauthenticated or not an admin, it immediately returns HTTP 404 `Not Found`. To regular users and external vulnerability scanners, `/admin` does not exist.
+- **Administrative Surface Cloaking:** In `backend/src/routes/admin.js` and `backend/src/routes/adminDashboard.js`, the `requireAdmin` middleware checks user role. If the requester is unauthenticated or not an admin, it immediately returns HTTP 404 `Not Found`. To regular users and external vulnerability scanners, `/admin` does not exist.
 - **Deleted Document Cloaking:** When a document is soft-deleted, it returns HTTP 404 across all endpoints for everyone, including its original owner.
+- **Frontend UI Cloaking:** In `client/src/components/ProtectedRoute.jsx` and `client/src/pages/NotFoundPage.jsx`, if a user attempts to access `/admin` or a document that returns a 404, the frontend unconditionally renders the generic `NotFoundPage`. No "Permission Denied" or "Contact Administrator" text is ever shown, preventing UI-level enumeration.
 
 ---
 
 ## Question 3: How does the cryptographic hash chain detect tampering?
 
 ### 60-Second Spoken Pitch (Say Out Loud):
-> *"TrustVault implements a tamper-evident, append-only cryptographic audit ledger in `src/audit.js`. It functions like a blockchain: each audit event stores an auto-incrementing monotonic sequence number with a unique index, and a SHA-256 hash calculated over the previous event's hash combined with the current event's canonical content.*
+> *"TrustVault implements a tamper-evident, append-only cryptographic audit ledger in `backend/src/audit.js`. It functions like a blockchain: each audit event stores an auto-incrementing monotonic sequence number with a unique index, and a SHA-256 hash calculated over the previous event's hash combined with the current event's canonical content.*
 >
 > *Our `verifyChain()` function validates log integrity through three mathematical checks: First, it verifies sequence continuity from block 1 to tip, ensuring no events were deleted. Second, it verifies pointer continuity, checking that event N's `previousHash` matches event N-1's stored `hash`. Third, it deterministically re-serializes the canonical payload of each event and recomputes the SHA-256 hash. If any database administrator or attacker altered a historical record—such as changing an ACCESS_DENIED status to SUCCESS—the recomputed hash diverges immediately, pinpointing the exact sequence number where the chain was severed.*
 >
@@ -166,7 +167,7 @@ $$\text{hash}_i = \text{SHA-256}\Big(\text{previousHash}_i \mathbin{\Vert} \text
 ```
 
 #### 2. Canonical Serialization
-Hashing raw JSON strings is non-deterministic because object key ordering and date formats can vary across environments. TrustVault implements `canonicalizeContent(event)` in `src/audit.js`:
+Hashing raw JSON strings is non-deterministic because object key ordering and date formats can vary across environments. TrustVault implements `canonicalizeContent(event)` in `backend/src/audit.js`:
 - Standardizes timestamps to ISO strings (`createdAt.toISOString()`).
 - Normalizes MongoDB `ObjectId` values to hex strings.
 - Sorts all nested `metadata` keys alphabetically using `Object.keys().sort()`.
@@ -177,7 +178,7 @@ Hashing raw JSON strings is non-deterministic because object key ordering and da
 The `verifyChain()` utility iterates through the entire collection sorted by `sequenceNumber: 1`:
 
 ```javascript
-// src/audit.js: verifyChain()
+// backend/src/audit.js: verifyChain()
 for (let i = 0; i < events.length; i++) {
   const current = events[i];
   const expectedSeq = i + 1;
@@ -248,12 +249,13 @@ When building search over permission-controlled resources, developers routinely 
    ```
    - **Vulnerability 1 (Metadata Leakage):** Exposing `totalMatches: 40` reveals the existence and quantity of confidential files the user cannot see.
    - **Vulnerability 2 (Denial of Service):** Fetching 50,000 documents from MongoDB into Node.js memory just to filter them down to 3 documents exhausts server heap space and CPU.
+
 2. **The Separate Count Query Pitfall:**
    - Running `Document.countDocuments({ name: regex })` without appending the permission filter leaks the global count in pagination metadata (`total`, `pageCount`, `resultCount`).
 
 #### 2. TrustVault's Zero-Leakage Architecture (Rule 6 & ADR 028)
 
-In `src/services/documentService.js`, `searchDocuments()` implements a strict **two-phase query compilation** that guarantees zero leakage:
+In `backend/src/services/documentService.js`, `searchDocuments()` implements a strict **two-phase query compilation** that guarantees zero leakage:
 
 ```
 Step 1: Permission Pre-Resolution
@@ -277,7 +279,7 @@ Document.find({
 ```
 
 #### 3. Strict Count Invariance (The 40 vs 3 Test)
-TrustVault's automated test suite includes a strict leakage test in [`tests/search.test.js`](file:///c:/Users/jithe/coding/TrustValut/tests/search.test.js):
+TrustVault's automated test suite includes a strict leakage test in [`backend/tests/search.test.js`](file:///c:/Users/jithe/coding/TrustValut/backend/tests/search.test.js):
 - **Setup:** 40 documents are uploaded containing the word `"Financial"` in their title.
 - **Grants:** User A owns all 40. User B (the viewer) is granted read permission to exactly 3 documents.
 - **Execution:** User B searches for `"Financial"`.
@@ -297,7 +299,7 @@ TrustVault's automated test suite includes a strict leakage test in [`tests/sear
 Use these quick bullet points to rehearse answering out loud before an interview:
 
 ### 1. `authorize(user, doc, action)`
-- **Role:** Centralized Policy Decision Point (PDP) in `src/authz.js`; all routes dispatch through it via `documentService`.
+- **Role:** Centralized Policy Decision Point (PDP) in `backend/src/authz.js`; all routes dispatch through it via `documentService`.
 - **Inputs:** `user`, `doc`, `action` (`read`, `edit`, `delete`, `grant`).
 - **Steps:**
   1. Validates action against frozen list.
@@ -314,9 +316,10 @@ Use these quick bullet points to rehearse answering out loud before an interview
 - **The Core Reason:** Universal 404 Cloaking eliminates reconnaissance and IDOR enumeration.
 - **The 403 Flaw:** `403 Forbidden` confirms that a document ID exists and that an administrative route is real.
 - **The 404 Fix:** Returning `404 Not Found` makes unauthorized documents and `/admin` routes completely indistinguishable from invalid or non-existent URLs. Attackers cannot probe or map the system.
+- **Frontend Symmetry:** In React, both unauthorized resources and non-existent routes render the identical generic `NotFoundPage`.
 
 ### 3. Hash Chain Tamper Detection
-- **Structure:** Append-only ledger in `src/audit.js`. Each event has a unique monotonic `sequenceNumber`, `previousHash`, and `hash = SHA256(previousHash + canonicalContent)`.
+- **Structure:** Append-only ledger in `backend/src/audit.js`. Each event has a unique monotonic `sequenceNumber`, `previousHash`, and `hash = SHA256(previousHash + canonicalContent)`.
 - **Serialization:** Deterministic canonicalization (ISO timestamps, string ObjectIds, sorted metadata keys).
 - **Verification (`verifyChain()`):**
   1. Monotonic sequence continuity (detects deleted records).
