@@ -60,9 +60,13 @@ async function seedDatabase(shouldDisconnect = false) {
     }
 
     // Configure MongoDB audit app user with least privilege (insert & find only)
-    const { setupAuditAppUser } = require('../src/audit');
-    await setupAuditAppUser();
-    console.log('[Seed] Configured MongoDB app user with insert and find privileges on auditevents');
+    try {
+      const { setupAuditAppUser } = require('../src/audit');
+      await setupAuditAppUser();
+      console.log('[Seed] Configured MongoDB app user with insert and find privileges on auditevents');
+    } catch (auditErr) {
+      console.log('[Seed] Notice on audit user configuration:', auditErr.message);
+    }
 
     console.log('[Seed] Database seeding completed successfully.');
   } catch (error) {

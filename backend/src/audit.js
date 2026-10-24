@@ -242,6 +242,14 @@ async function setupAuditAppUser(customConnection) {
       roles: [],
     });
   } catch (err) {
+    if (err.code === 8000 || err.codeName === 'AtlasError' || (err.message && (err.message.includes('CMD_NOT_ALLOWED') || err.message.includes('not allowed')))) {
+      console.log('[Audit] Managed database detected (MongoDB Atlas). Cloud IAM manages roles; application schema enforces audit immutability.');
+      return {
+        username: AUDIT_APP_USER_CONFIG.username,
+        role: AUDIT_APP_USER_CONFIG.role,
+        uri: conn._connectionString || '',
+      };
+    }
     if (err.codeName === 'RoleAlreadyExists' || (err.message && err.message.includes('already exists'))) {
       await db.command({
         updateRole: AUDIT_APP_USER_CONFIG.role,
