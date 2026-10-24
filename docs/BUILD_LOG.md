@@ -2136,6 +2136,36 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
 - **Live Verification:**
   - Verified via direct HTTP and Vite proxy: `POST /api/auth/login` returns `HTTP 200 OK` and `{ message: "Login successful", user: { ... } }`.
 
+---
+
+## Task Log 018: Navbar Auth Actions Alignment, Enterprise Signup Modal & Compact Table Typography
+**Timestamp:** 2026-10-24
+**Status:** Completed & Verified
+
+### 1. What Was Built / Refined
+1. **Navbar Auth Actions Alignment on `/login`:**
+   - Moved authentication action links out of the center navigation container (`.navbar-nav`) and into the dedicated right-hand action container (`.navbar-actions`).
+   - Added a distinct "Sign In" link and a prominent "Sign Up" button on the navigation bar when unauthenticated.
+   - Connected "Sign Up" to an **Enterprise Account Registration Dialog** rendered via React `createPortal` to `document.body` (bypassing sticky header `backdrop-filter` clipping).
+   - Educates users that TrustVault is an enterprise zero-trust vault where self-service signup is intentionally disabled per security threat models, and guides evaluators to use pre-seeded demo accounts (Admin, Owner, Viewer).
+   - Added a direct link on the login card (`"Need an account? Learn about enterprise signup ->"`) that opens the registration dialog.
+2. **Compact Table Typography across Application:**
+   - Reduced font sizes across all tables (`.vault-table`, `.sharing-table`, `.admin-users-table`, `.admin-activity-table`, `.admin-permissions-table`) from `0.9rem` down to `0.8125rem` (13px).
+   - Tightened table header (`th`) typography from `0.8rem` to `0.72rem` with uppercase tracking and compact `0.65rem 0.95rem` padding.
+   - Optimized cell padding and monospace data displays (hashes, sequence numbers, timestamps) to `0.75rem`.
+   - Scaled down table avatar initials from 32px to 28px and badges to `0.68rem` for dense, clean dashboard formatting.
+
+### 2. Files Modified
+- `client/src/components/Navbar.jsx`: Refactored unauthenticated navbar layout, added Sign Up button with `createPortal` modal.
+- `client/src/pages/LoginPage.jsx`: Added enterprise signup helper link connecting to the navbar modal.
+- `client/src/index.css`: Added navbar auth button styles, signup modal styling, and compact table typography rules.
+- `docs/BUILD_LOG.md`: Appended task log.
+
+### 3. Verification
+- `npm run client:build` completed with 0 errors.
+- Automated test suites: 13 passed, 13 total (224 tests passing).
+- Browser subagent verified visually via live screenshots: navbar buttons aligned, centered modal, and dense table typography.
+
 
 
 

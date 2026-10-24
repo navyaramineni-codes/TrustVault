@@ -139,6 +139,21 @@ export default function LoginPage() {
             </button>
           </form>
 
+          {/* Guidance for new users / signup */}
+          <div className="login-signup-hint">
+            <span>Need an account? </span>
+            <button
+              type="button"
+              className="btn-text-link"
+              onClick={() => {
+                const signupBtn = document.getElementById('nav-btn-signup');
+                if (signupBtn) signupBtn.click();
+              }}
+            >
+              Learn about enterprise signup &rarr;
+            </button>
+          </div>
+
           {/* Quick Demo Credentials */}
           <div className="demo-credentials-section">
             <div className="demo-divider">
