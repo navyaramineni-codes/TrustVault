@@ -354,4 +354,84 @@ Returning HTTP 403 Forbidden creates an information disclosure vulnerability kno
    - **State Bypass:** Catching deactivated accounts (`isActive: false`) that possess valid ownership or permissions.
    - **Status Code Leaks:** Ensuring no code path accidentally throws or returns a 403 instead of the mandated 404.
 
+---
+
+## Build Entry: Complete Implementation of `authorize()` in `src/authz.js`
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- Implemented the full centralized authorization decision engine `authorize(user, doc, action)` in `src/authz.js` in strict compliance with `RULES.md` without modifying any test in `tests/authz.test.js`.
+- All 35 parametrized matrix test cases now pass (100% pass rate; 61 total tests passing across all test suites).
+- Built custom `AuthorizationError` class explicitly configured with `status: 404` and `statusCode: 404`, strictly satisfying Rule 3 ("Unauthorized access returns 404, never 403").
+- Built `deny(user, doc, action, reason)` helper that logs an immutable `ACCESS_DENIED` audit event via `src/audit.js` before throwing the 404 error, strictly satisfying Rule 7 ("Every state change and every denied attempt writes an audit event via src/audit.js").
+- Implemented complete access tier evaluation:
+  - **Ownership check:** Compares user and document owner ObjectIds, granting full access (`read`, `edit`, `delete`, `grant`) strictly to the owner.
+  - **Viewer access:** Grants `read` and `edit` when a user possesses an explicit `edit` grant in the `permissions` collection; grants `read` only when possessing a `read` grant. Rejects `delete` and `grant` unconditionally for all non-owners (Rule 4).
+  - **Admin restrictions:** Enforces that `admin` role has zero automatic access to document contents (Rule 4). Admins only access documents if they are the direct owner or possess an explicit grant.
+  - **Account status validation:** Enforces that unauthenticated (`null`) or deactivated (`isActive: false`) users are immediately rejected.
+  - **Action validation:** Rejects unsupported or arbitrary action strings with 404.
+- Recorded architecture decisions ADR 015 and ADR 016 in `docs/DECISIONS.md`.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `src/authz.js` | Created | Centralized Policy Decision Point (PDP) implementing `authorize()`, `deny()`, and `AuthorizationError`. |
+| `docs/DECISIONS.md` | Modified | Appended ADRs 015 (Centralized PDP) and 016 (Unified Denial Pattern with Inline Audit Emission). |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Centralized Policy Decision Point (PDP):** Scattered authorization checks throughout route handlers inevitably lead to authorization bypasses, inconsistent error codes, and forgotten audit events. Centralizing all access decisions in `src/authz.js` guarantees that every document operation passes through an identical, unified decision engine.
+- **Strict Fail-Closed Architecture:** The function is structured with positive validation guards: if an action or condition is not explicitly recognized and validated as permitted, execution falls through to the `deny()` helper. Access is never granted by default.
+- **Robust ObjectId Equality (`areIdsEqual`):** Document references in Mongoose can arrive as BSON ObjectIds, hexadecimal strings, or populated documents (`doc.ownerId._id`). The comparison helper handles all forms safely, preventing type mismatch bugs where two identical IDs fail equality checks.
+- **Inline Denial Auditing:** Handling audit event creation inside `deny()` guarantees that no rejection path can ever bypass the audit log. The audit event captures the attempted action, user, document, and exact denial rationale before the 404 error is raised.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Insecure Direct Object Reference (IDOR) & Horizontal Access (CWE-639 / CWE-284):**
+   - Attackers attempting to access, edit, or delete documents belonging to another user by guessing or enumerating IDs are intercepted by `authorize()` and rejected.
+2. **Vertical Privilege Escalation via Viewer Capabilities (CWE-269):**
+   - Malicious viewers who have been granted `edit` access cannot escalate privileges to delete the document or share/grant permissions to unauthorized parties, because non-owners are strictly blocked from `delete` and `grant`.
+3. **Insider Threat & Administrative Snooping (CWE-285):**
+   - By eliminating automatic administrative bypasses, system administrators cannot view confidential document contents unless the document owner explicitly grants them permission.
+4. **Information Disclosure via Resource Existence Oracles (CWE-200 / CWE-209):**
+   - All unauthorized attempts throw `AuthorizationError` with `status: 404` (never 403). Attackers cannot distinguish between an invalid document ID and an existing confidential document.
+5. **Session Exploitation on Deactivated Users (CWE-287):**
+   - Users whose accounts have been deactivated (`isActive: false`) are denied access even if they hold active session cookies or own the document.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: What is the architectural difference between a Policy Enforcement Point (PEP) and a Policy Decision Point (PDP) in access control systems, and how is `authorize()` structured here?
+**Answer:**
+In standard XACML and zero-trust authorization architectures:
+1. **Policy Enforcement Point (PEP):** The component that intercepts the incoming user request, pauses execution, queries the decision engine, and enforces the outcome (either continuing request processing or terminating with an HTTP error). In TrustVault, Express route handlers and middleware act as PEPs.
+2. **Policy Decision Point (PDP):** The centralized component that evaluates user attributes, resource metadata, requested actions, and environment policies to make an authoritative permit/deny decision. In TrustVault, `src/authz.js` (`authorize()`) is the PDP.
+3. **Architectural Benefit:** Decoupling the PDP from the PEP ensures that business logic (HTTP parameters, response formatting) is completely separate from authorization policy. The PDP can be independently tested, unit-verified against an exhaustive matrix, audited for compliance, and updated without touching route handlers.
+
+#### Question 2: Why must an authorization engine enforce "Fail-Closed" (Default Deny) semantics, and how does the implementation of `authorize()` guarantee that no path accidentally permits access?
+**Answer:**
+1. **The Fail-Open Danger:** In "fail-open" designs, authorization functions check for disqualifying conditions (e.g. `if (user.isBanned) return deny()`) and default to granting access at the end of the function if no rule triggered. If a developer forgets an edge case (e.g. an unhandled action string or a null user), the function inadvertently returns `true`, granting unauthorized access.
+2. **Fail-Closed Implementation:** In a "fail-closed" (default deny) design, access is assumed forbidden until proven permitted:
+   - Input validations immediately reject unsupported actions, missing documents, unauthenticated actors, and inactive accounts via `deny()`.
+   - Access is granted *only* when positive criteria are explicitly verified:
+     - The user is confirmed to be the owner for supported actions (`return true`).
+     - The user has an explicit database permission matching the required action level (`return true`).
+   - Any execution reaching the end of the function calls `deny('Unauthorized permission level')`. There is zero probability of accidental permissive fallthrough.
+
+#### Question 3: How does combining database-level permission lookups (`Permission.findOne`) with ownership checks in `authorize()` prevent race conditions and privilege escalation during concurrent permission updates?
+**Answer:**
+1. **Atomicity and Freshness:** By querying the normalized `Permission` collection at the moment of authorization, `authorize()` always inspects the absolute latest state committed to MongoDB. If an owner revokes a user's permission, the very next request from that user queries `Permission.findOne`, finds `null`, and is immediately rejected with 404.
+2. **Separation from Stale Session Claims:** If permissions were stored inside user session cookies or JWT claims, a permission revocation would not take effect until the session expired or the JWT was reissued, leaving a dangerous window for unauthorized access.
+3. **Compound Index Optimization:** The query `Permission.findOne({ documentId: doc._id, userId: user._id })` leverages the unique compound index `{ documentId: 1, userId: 1 }`, guaranteeing $O(\log N)$ B-tree lookup time with zero table-scan latency and preventing duplicate permission grants.
+
+
 

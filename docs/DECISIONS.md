@@ -110,4 +110,21 @@
 - **Decision:** Codify in the authorization matrix that every denied access attempt—regardless of user role, token validity, or action attempted—returns an error with status 404 (Not Found), never 403 (Rule 3).
 - **Consequences:** Completely eliminates metadata enumeration and IDOR discovery vectors, ensuring unauthorized users cannot differentiate between a non-existent document and an existing confidential document they lack rights to view.
 
+---
+
+## ADR 015: Centralized Policy Decision Point (PDP) via `authorize()` in `src/authz.js`
+- **Status:** Accepted
+- **Context:** In multi-tenant document systems, distributing authorization checks across individual Express route handlers leads to logic drift, missed edge cases, and high audit overhead. Rule 2 specifies: *"Every document access goes through authorize(user, doc, action) in src/authz.js. Routes never query the documents collection directly."*
+- **Decision:** Implement a centralized asynchronous authorization function `authorize(user, doc, action)` in `src/authz.js` that acts as the sole Policy Decision Point (PDP). All controllers and operations must consult this function before processing document access.
+- **Consequences:** Establishes a single, easily auditable choke-point for access control. Guarantees uniform enforcement of ownership checks, viewer privilege ceilings (`delete` and `grant` restricted strictly to owner), and database-level permission lookups.
+
+---
+
+## ADR 016: Unified Denial Pattern with Inline Audit Emission
+- **Status:** Accepted
+- **Context:** Rule 3 mandates returning 404 (never 403) on unauthorized access, and Rule 7 mandates that every denied attempt writes an audit event via `src/audit.js`. Implementing this in disparate error blocks risks omissions.
+- **Decision:** Channel all authorization rejections through an internal `deny(user, doc, action, reason)` function in `src/authz.js`. This function asynchronously emits an `ACCESS_DENIED` audit event with actor, document, action, status `'DENIED'`, and rationale, then immediately throws an `AuthorizationError` with `status: 404` and `statusCode: 404`.
+- **Consequences:** Guarantees that no denial path escapes security audit logging, completely eliminates duplicate audit code across controllers, and strictly maintains the 404 status code guarantee.
+
+
 
