@@ -557,6 +557,130 @@ In standard XACML and zero-trust authorization architectures:
    - **Heap Budgeting:** In a system with a 5MB per-file limit and a worker pool handling 20 concurrent uploads, maximum transient heap memory allocated for uploads is bounded at $\sim100\text{MB}$, which fits comfortably within standard Node.js heap allocations (default 2GB–4GB).
    - **Alternative for Large Files (Chunked Streaming):** For applications requiring large file uploads (e.g. 500MB video/dataset files), buffering the entire file in RAM is infeasible. Instead, stream the first 4KB to 8KB into memory to validate magic bytes using `file-type`, and once validated, pipe the remainder of the incoming stream directly to an isolated disk location or object store (e.g. AWS S3 / Google Cloud Storage) under a UUID.
 
+---
+
+## Build Entry: Document Lifecycle Management - List, Streamed Download, Edit Metadata, and Cascading Delete through `authorize()`
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Comprehensive Integration Test Suite (`tests/documents.test.js` - 22 passing tests):**
+  - **List (`GET /documents`):**
+    - Verified document owners receive all documents they own.
+    - Verified viewers receive strictly granted documents via database-level filtering (Rule 6), never observing unshared documents.
+    - Verified administrators receive an empty list if they do not own documents and have not been granted explicit access (Rule 4).
+    - Verified unauthenticated requests are rejected with HTTP 401.
+  - **Download (`GET /documents/:id/download`):**
+    - Verified streaming download through the application setting `Content-Disposition: attachment; filename="<originalName>"` and `Content-Type: <mimeType>`.
+    - Verified streamed binary content integrity byte-for-byte against the stored SHA-256 cryptographic digest.
+    - Verified successful download for document owners, viewers with granted `read` level, and viewers with granted `edit` level.
+    - Verified unauthorized download attempts (unshared documents, administrators without grants, non-existent documents) return HTTP 404 (never 403 per Rule 3 & 4) and emit an `ACCESS_DENIED` audit event.
+    - Verified emission of a `DOCUMENT_DOWNLOAD` audit event upon successful download.
+  - **Edit Metadata (`PATCH /documents/:id` and `PUT /documents/:id`):**
+    - Verified owners can update `title` and `description`.
+    - Verified viewers with granted `edit` level can update `title` and `description`.
+    - Verified viewers with granted `read` level cannot update metadata, returning HTTP 404 and emitting an `ACCESS_DENIED` audit event.
+    - Verified administrators without ownership/grants cannot edit metadata, returning HTTP 404.
+    - Verified immutable security fields (`fileStorageName`, `sha256`, `ownerId`) cannot be tampered with via metadata updates.
+    - Verified emission of a `DOCUMENT_UPDATE` audit event capturing previous and new metadata.
+  - **Delete (`DELETE /documents/:id`):**
+    - Verified viewers (even those with granted `edit` level) cannot delete documents, returning HTTP 404 and emitting an `ACCESS_DENIED` audit event (Rule 4: delete is always denied to viewers).
+    - Verified administrators without ownership cannot delete documents, returning HTTP 404.
+    - Verified document owners can delete documents, triggering:
+      - Physical disk removal of the storage file from `storage/documents/<uuid>`.
+      - Cascading removal of all associated ACL permission records from the `Permission` collection.
+      - Removal of the document record from MongoDB.
+      - Emission of a `DOCUMENT_DELETE` audit event with status `SUCCESS`.
+- **Encapsulated Document Service Layer (`src/services/documentService.js`):**
+  - Encapsulated all Mongoose `Document` queries (`find`, `findById`, `create`, `deleteOne`) within the service layer.
+  - Route handlers in `src/routes/documents.js` NEVER query the `Document` collection directly, fulfilling Rule 2 with 100% compliance.
+  - Every single document retrieval and mutation method invokes `authorize(user, doc, action)` in `src/authz.js` before executing operations.
+- **Document Route Controller (`src/routes/documents.js`):**
+  - Implemented `GET /`, `GET /:id/download`, `PATCH /:id`, `PUT /:id`, and `DELETE /:id` delegating strictly to `documentService`.
+  - Added robust `requireAuth` middleware verifying session state and populating `req.user`.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `tests/documents.test.js` | Created | Comprehensive integration test suite (22 tests) covering list, download, edit metadata, and delete authorization. |
+| `src/services/documentService.js` | Created | Centralized service encapsulating all database queries on `Document`, enforcing `authorize()` on every document access (Rule 2). |
+| `src/routes/documents.js` | Modified | Updated document routes to delegate all document operations to `documentService`, stream downloads with attachments, and enforce session authentication. |
+| `docs/DECISIONS.md` | Modified | Appended ADRs 020 (Service Layer Chokepoint), 021 (Database-Level Permission Filtering), 022 (Streamed Downloads with Attachment), and 023 (Cascading Deletion). |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Elimination of Direct Route Queries (Rule 2):**
+  - In traditional Express architectures, controllers often query models directly (`const doc = await Document.findById(id)`). When new routes are added or refactored, developers frequently forget to call the authorization function, resulting in critical Broken Object-Level Authorization (BOLA / IDOR) vulnerabilities.
+  - By moving all `Document` queries into `src/services/documentService.js`, every retrieval function (`getDocumentById`, `getDownloadStream`, `updateDocumentMetadata`, `deleteDocument`, `listDocuments`) acts as an inescapable Policy Enforcement Point (PEP) that automatically invokes `authorize(user, doc, action)` in `src/authz.js`.
+- **Database-Level Permission Filtering (Rule 6):**
+  - Fetching all documents into memory and filtering with JavaScript array methods (`documents.filter(...)`) causes significant performance degradation as collections scale, introduces pagination and limit inaccuracies, and leaks document counts via response timing or memory footprint.
+  - `listDocuments(user)` queries the `Permission` collection for granted document IDs and constructs a MongoDB `$or` query: `{ $or: [{ ownerId: user._id }, { _id: { $in: grantedDocIds } }] }`. The database utilizes indexed B-Tree evaluation to return strictly authorized documents over the network.
+- **Streamed File Downloads with `Content-Disposition: attachment`:**
+  - Direct file downloads can lead to Cross-Site Scripting (XSS) if user-uploaded files (such as SVGs containing `<script>` tags or HTML files disguised as documents) are rendered inline by the browser within the application's origin. Setting `Content-Disposition: attachment` forces browsers to treat the payload as an opaque file download rather than executing or rendering it in the DOM.
+  - Streaming via `fs.createReadStream().pipe(res)` maintains an $O(1)$ constant memory footprint, preventing memory exhaustion when concurrent users download multi-megabyte documents.
+- **Complete Cascading Resource Cleanup on Delete:**
+  - Deleting a document without unlinking its physical disk storage wastes disk capacity and leaves sensitive data orphaned on the filesystem. Leaving stale permission records in MongoDB creates ACL inconsistencies. `deleteDocument()` coordinates physical disk file unlinking, permission record purge, and database record removal in an atomic, auditable sequence.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Broken Object-Level Authorization & Insecure Direct Object References (BOLA / IDOR - CWE-639 / CWE-284):**
+   - Malicious users guessing or enumerating document IDs cannot view, download, modify, or delete documents belonging to other users. Every operation verifies ownership or explicit database permissions via `authorize()`.
+2. **Information Disclosure via Resource Existence Oracles (CWE-200 / CWE-209):**
+   - Per Rule 3 & 4, all unauthorized access attempts—whether targeting unshared documents, non-existent documents, or invalid actions—return HTTP 404 (never 403). Attackers cannot probe document IDs to discover confidential documents.
+3. **Privilege Escalation by Viewers & System Administrators (CWE-269 / CWE-285):**
+   - Viewers with `edit` permissions cannot delete documents or grant permissions to third parties (Rule 4). System administrators have no automatic bypass and cannot list or download document contents without explicit grants.
+4. **Same-Origin Cross-Site Scripting via File Execution (CWE-79):**
+   - Enforcing `Content-Disposition: attachment; filename="..."` ensures the browser downloads the file rather than executing scripts within the application's origin context.
+5. **Denial of Service via Memory Exhaustion (CWE-400):**
+   - Streaming file downloads directly from disk to the HTTP response pipe prevents allocating large file buffers in the Node.js V8 heap.
+6. **Mass Assignment & Metadata Tampering (CWE-915):**
+   - The metadata update route strictly filters input fields, permitting only `title` and `description` to be updated. Attackers cannot overwrite immutable security fields like `fileStorageName`, `sha256`, `sizeBytes`, or `ownerId`.
+7. **Orphaned File Accumulation & ACL State Desynchronization (CWE-404):**
+   - Synchronous cascading deletion guarantees that physical files and ACL permission entries are immediately destroyed when a document is deleted.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why is streaming files with `fs.createReadStream().pipe(res)` and `Content-Disposition: attachment` safer and more performant than using `fs.readFile()` or `Content-Disposition: inline`?
+**Answer:**
+1. **Performance and Memory Scalability:**
+   - `fs.readFile()` reads the entire file into Node.js V8 heap memory before transmitting. If 50 concurrent users download a 10MB document, the server allocates 500MB of RAM. Under high concurrency, this triggers memory fragmentation, Garbage Collection pauses, and Out-Of-Memory (OOM) crashes.
+   - `fs.createReadStream().pipe(res)` streams data in small chunks (default 64KB). The server memory footprint remains bounded at $\sim64\text{KB}$ per active download regardless of file size, providing true $O(1)$ space complexity and backpressure support.
+2. **Security against Same-Origin Cross-Site Scripting (XSS):**
+   - When files are served with `Content-Disposition: inline`, the browser attempts to render the file directly in the browser tab. If an attacker uploads a polyglot file, an SVG image with embedded `<script>` tags, or a disguised HTML document, the browser executes the script in the security origin of the web application, granting the attacker access to session tokens, local storage, and DOM state.
+   - Setting `Content-Disposition: attachment; filename="<name>"` instructs user agents to treat the payload strictly as an external download, saving it to disk rather than interpreting or executing it within the application origin.
+
+#### Question 2: In multi-tenant systems, why should search and document listing be permission-filtered at the database query layer rather than in JavaScript application memory after fetching?
+**Answer:**
+1. **Scalability and Network Efficiency:**
+   - In-memory filtering requires querying all documents from MongoDB across the network into Node.js memory (`Document.find({})`) and running `documents.filter(...)`. In a production system with 1,000,000 documents, this exhausts network bandwidth, saturates the database connection, and crashes the Node.js process.
+   - Database-level filtering (`Document.find({ $or: [{ ownerId: user._id }, { _id: { $in: grantedDocIds } }] })`) uses MongoDB's compound B-Tree indexes to retrieve only the authorized records, transmitting only relevant data over the wire.
+2. **Pagination and Aggregation Integrity:**
+   - In-memory filtering breaks database pagination (`limit` and `skip`). If an application requests page 1 with `limit: 20`, fetching 20 documents and filtering out 18 unauthorized documents returns only 2 documents to the user, breaking standard pagination contracts.
+   - Filtering inside the database ensures that `limit` and `skip` apply directly to authorized results, maintaining accurate page sizes and total counts.
+3. **Security and Timing Attack Prevention:**
+   - Fetching unconstrained records into application memory risks accidental data leaks if an unhandled exception or serialization bug occurs. Furthermore, differences in response latency between filtering 10,000 records vs 1 record can leak the total volume of sensitive documents residing in the system.
+
+#### Question 3: How does encapsulating database queries behind a dedicated service layer (with mandatory calls to `authorize()`) prevent IDOR vulnerabilities better than relying on controller-level checks?
+**Answer:**
+1. **The Vulnerability of Distributed Controller Checks:**
+   - In codebases where route controllers directly invoke database models (`Document.findById(req.params.id)`), authorization enforcement relies entirely on the discipline of individual developers.
+   - In fast-moving engineering teams, developers creating new endpoints (e.g. `GET /documents/:id/preview`, `POST /documents/:id/duplicate`) frequently forget to call the authorization helper, or implement inconsistent permission logic, directly creating Insecure Direct Object Reference (IDOR) vulnerabilities.
+2. **Service Layer as an Inescapable Policy Enforcement Point (PEP):**
+   - By encapsulating all model operations inside `documentService.js` and banning direct model queries in routes (Rule 2), no document can be fetched from the database without passing through `getDocumentById()`.
+   - `getDocumentById()` systematically invokes `authorize(user, doc, action)` before returning the document instance. The authorization check is structurally coupled to the database query: it is physically impossible for a controller to retrieve a document without triggering the authorization policy.
+3. **Consistency and Auditing:**
+   - Centralizing document access guarantees uniform error behavior (always throwing `NotFoundError` returning 404 per Rule 3 & 4) and guarantees that every denied attempt emits an immutable security audit event via `src/audit.js`.
+
+
 
 
 

@@ -150,6 +150,39 @@
 - **Decision:** Persist files strictly inside a dedicated directory outside the web root (`storage/documents`), generating a cryptographically random UUID v4 (`crypto.randomUUID()`) as the physical filename with no extension. Calculate and store a SHA-256 cryptographic digest (`crypto.createHash('sha256')`) along with metadata in the `Document` database record.
 - **Consequences:** Stored files cannot be directly executed by web servers or reached via static URL routing. Disk overwrites from identical user filenames are mathematically impossible. The SHA-256 fingerprint provides cryptographic non-repudiation and integrity verification.
 
+---
+
+## ADR 020: Document Service Layer Chokepoint & Total Elimination of Direct Route Queries (Rule 2)
+- **Status:** Accepted
+- **Context:** Rule 2 specifies: *"Every document access goes through authorize(user, doc, action) in src/authz.js. Routes never query the documents collection directly."* Allowing Express route handlers to directly call `Document.find()`, `Document.findById()`, or `Document.deleteOne()` invites authorization check omissions, inconsistent error responses, and duplicated business logic across controllers.
+- **Decision:** Encapsulate all Mongoose `Document` queries exclusively within `src/services/documentService.js`. Every document retrieval or modification method (`getDocumentById`, `getDownloadStream`, `updateDocumentMetadata`, `deleteDocument`, `listDocuments`) acts as a mandatory Policy Enforcement Point (PEP) that invokes `authorize(user, doc, action)` in `src/authz.js` before returning data or committing writes. Route handlers in `src/routes/documents.js` interact solely through `documentService`.
+- **Consequences:** Architectural guarantee that no document operation can bypass centralized authorization. Centralizes error translation (converting denial exceptions to standardized 404 responses), eliminates code duplication, and enforces strict adherence to Rule 2.
+
+---
+
+## ADR 021: Database-Level Permission-Filtered Search & Listing (Rule 6)
+- **Status:** Accepted
+- **Context:** Rule 6 mandates: *"Search is permission-filtered inside the database query, never in JS after fetching."* Fetching unconstrained document lists and filtering in application memory causes memory bloat, high database I/O, pagination corruption, and timing leakage risks.
+- **Decision:** In `listDocuments(user)`, query the normalized `Permission` collection to resolve all `documentId` records where `userId === user._id`. Construct a compound MongoDB query: `{ $or: [{ ownerId: user._id }, { _id: { $in: grantedDocIds } }] }` sorted by `{ createdAt: -1 }`. Re-verify each document with `authorize(user, doc, 'read')` for defense-in-depth before serialization.
+- **Consequences:** Database queries return strictly authorized records via indexed evaluations, conserving network bandwidth and memory. Requesters without explicit ownership or grants (including administrators) receive an empty list without leaking document existence.
+
+---
+
+## ADR 022: Streamed File Download with Strict `Content-Disposition: attachment` & MIME Enforcement
+- **Status:** Accepted
+- **Context:** Serving uploaded user files using `Content-Disposition: inline` or static web handlers allows browsers to parse active content (e.g. malicious JavaScript embedded in SVG images or HTML disguised as documents), resulting in Same-Origin Cross-Site Scripting (XSS). Furthermore, reading whole files into RAM via `fs.readFile()` before sending exhausts server memory during concurrent downloads of large files.
+- **Decision:** Implement document downloads via Node.js read streams (`fs.createReadStream().pipe(res)`), streaming bytes directly from the decoupled `storage/documents/<uuid>` disk path. Explicitly set `Content-Disposition: attachment; filename="<originalFileName>"` and specify the stored `Content-Type: <mimeType>`.
+- **Consequences:** Forces user agents to treat the payload as a downloaded attachment rather than executing or rendering it in the application's DOM context, eliminating Same-Origin XSS. Streaming provides an $O(1)$ memory footprint regardless of file size, and emits a `DOCUMENT_DOWNLOAD` audit event upon successful access.
+
+---
+
+## ADR 023: Cascading Deletion of Physical Storage & Associated Permissions
+- **Status:** Accepted
+- **Context:** Deleting a document record in MongoDB without removing its physical disk counterpart leaves orphaned files, creating storage bloat and potential forensic leaks. Leaving lingering `Permission` records risks accidental privilege resurrection if ObjectIds collide or corrupts ACL statistics.
+- **Decision:** In `deleteDocument()`, enforce that only the document owner can delete the file (`authorize(user, doc, 'delete')`). Upon authorization, synchronously coordinate the deletion of the physical file in `storage/documents/<uuid>` via `fs.promises.unlink`, purge all permission records via `Permission.deleteMany({ documentId: doc._id })`, and remove the document via `Document.deleteOne({ _id: doc._id })`.
+- **Consequences:** Guarantees complete and clean teardown of both physical disk assets and database access control entries, preventing orphaned storage leaks. Logs an immutable `DOCUMENT_DELETE` audit event.
+
+
 
 
 

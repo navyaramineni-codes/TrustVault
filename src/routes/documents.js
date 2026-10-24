@@ -4,8 +4,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const FileType = require('file-type');
-const { Document } = require('../models');
+const { User } = require('../models');
 const { logAuditEvent } = require('../audit');
+const documentService = require('../services/documentService');
 
 const router = express.Router();
 
@@ -42,19 +43,29 @@ const upload = multer({
 /**
  * Authentication guard middleware for document routes
  */
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   if (!req.session || !req.session.userId) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  next();
+
+  try {
+    const user = await User.findById(req.session.userId);
+    if (!user || user.isActive === false) {
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    next(error);
+  }
 }
 
 /**
- * @route   POST /documents/upload (also mounted at /documents and /api/documents/upload)
- * @desc    Upload document with magic byte inspection, path traversal sanitization, UUID storage & SHA-256 hash
- * @access  Authenticated
+ * Upload request handler
  */
-router.post('/upload', requireAuth, (req, res, next) => {
+async function handleUpload(req, res, next) {
   upload.single('file')(req, res, async (err) => {
     // 1. Handle Multer size limit error (Bad Upload 3: Oversized file)
     if (err) {
@@ -178,33 +189,18 @@ router.post('/upload', requireAuth, (req, res, next) => {
       const targetPath = path.join(STORAGE_DIR, fileStorageName);
       await fs.promises.writeFile(targetPath, req.file.buffer);
 
-      // Save document record in database
-      const document = await Document.create({
+      // Save document record through documentService (Rule 2: Routes never query documents directly)
+      const document = await documentService.createDocument({
+        user: req.user,
         title: req.body.title || path.parse(originalName).name || 'Untitled Document',
         description: req.body.description || '',
-        fileStorageName: fileStorageName,
+        fileStorageName,
         originalFileName: originalName,
         mimeType: detected.mime,
         sizeBytes: req.file.size,
-        sha256: sha256,
-        ownerId: req.session.userId,
-      });
-
-      // Log success audit event (Rule 7: Every state change writes an audit event)
-      await logAuditEvent({
-        eventType: 'DOCUMENT_CREATE',
-        userId: req.session.userId,
-        documentId: document._id,
-        action: 'create',
-        status: 'SUCCESS',
+        sha256,
         ipAddress: req.ip,
         userAgent: req.get('User-Agent'),
-        metadata: {
-          title: document.title,
-          sha256: document.sha256,
-          sizeBytes: document.sizeBytes,
-          mimeType: document.mimeType,
-        },
       });
 
       res.status(201).json({
@@ -215,13 +211,133 @@ router.post('/upload', requireAuth, (req, res, next) => {
       next(error);
     }
   });
+}
+
+/**
+ * @route   GET /documents (also mounted at /api/documents)
+ * @desc    List all documents accessible to the requesting user (Rule 6: permission-filtered in DB)
+ * @access  Authenticated
+ */
+router.get('/', requireAuth, async (req, res, next) => {
+  try {
+    const documents = await documentService.listDocuments(req.user);
+    res.status(200).json({
+      documents: documents.map((doc) => doc.toJSON()),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
-// Alias: POST /documents (root of router)
-router.post('/', (req, res, next) => {
-  // Delegate to /upload handler
-  req.url = '/upload';
-  router.handle(req, res, next);
+/**
+ * @route   POST /documents/upload
+ * @desc    Upload document with magic byte inspection, path traversal sanitization, UUID storage & SHA-256
+ * @access  Authenticated
+ */
+router.post('/upload', requireAuth, handleUpload);
+
+/**
+ * @route   POST /documents
+ * @desc    Alias for upload
+ */
+router.post('/', requireAuth, handleUpload);
+
+/**
+ * @route   GET /documents/:id/download
+ * @desc    Stream document through application with Content-Disposition: attachment
+ * @access  Authenticated (authorized via authorize() in documentService)
+ */
+router.get('/:id/download', requireAuth, async (req, res, next) => {
+  try {
+    const { document, stream } = await documentService.getDownloadStream(
+      req.user,
+      req.params.id,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+
+    // Stream through the app with Content-Disposition: attachment
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(document.originalFileName)}"`
+    );
+    res.setHeader('Content-Type', document.mimeType);
+    res.setHeader('Content-Length', document.sizeBytes);
+
+    stream.pipe(res);
+    stream.on('error', (streamErr) => next(streamErr));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   PATCH /documents/:id
+ * @desc    Edit document metadata (title and description) through authorize()
+ * @access  Authenticated (authorized via authorize() in documentService)
+ */
+router.patch('/:id', requireAuth, async (req, res, next) => {
+  try {
+    const updatedDoc = await documentService.updateDocumentMetadata(
+      req.user,
+      req.params.id,
+      {
+        title: req.body.title,
+        description: req.body.description,
+      },
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+
+    res.status(200).json({
+      message: 'Document metadata updated successfully',
+      document: updatedDoc.toJSON(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   PUT /documents/:id
+ * @desc    Alias for updating document metadata
+ */
+router.put('/:id', requireAuth, async (req, res, next) => {
+  try {
+    const updatedDoc = await documentService.updateDocumentMetadata(
+      req.user,
+      req.params.id,
+      {
+        title: req.body.title,
+        description: req.body.description,
+      },
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+
+    res.status(200).json({
+      message: 'Document metadata updated successfully',
+      document: updatedDoc.toJSON(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   DELETE /documents/:id
+ * @desc    Delete document, physical storage file, and associated permissions through authorize()
+ * @access  Authenticated (authorized via authorize() in documentService - owner only)
+ */
+router.delete('/:id', requireAuth, async (req, res, next) => {
+  try {
+    const result = await documentService.deleteDocument(
+      req.user,
+      req.params.id,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
 });
 
 module.exports = router;
