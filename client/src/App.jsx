@@ -59,9 +59,17 @@ export default function App() {
                 }
               />
 
-              {/* Protected Admin Route (Accessible strictly to role === 'admin') */}
+              {/* Protected Admin Routes (Accessible strictly to role === 'admin') */}
               <Route
                 path="/admin"
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <AdminPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/admin/:tab"
                 element={
                   <ProtectedRoute allowedRoles={['admin']}>
                     <AdminPage />

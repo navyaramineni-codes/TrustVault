@@ -1913,6 +1913,121 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
      ```
    - The query fails closed and safely returns zero results.
 
+---
+
+## Build Entry: Admin Console (User Management, Activity Feed, Permission History, and Verify Audit Chain)
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Complete Administration & Audit Console (`client/src/pages/AdminPage.jsx`):**
+  - **Cryptographic Audit Chain Verification (“Verify audit chain” Action):**
+    - Prominent header button (`#btn-verify-chain`) that executes `POST /api/admin/verify-chain`.
+    - High-contrast visual banner displaying an unambiguous **PASS** (emerald glow) or **FAIL** (crimson pulse) status.
+    - Verified event count, latest SHA-256 block hash, verification timestamp, and broken sequence identification upon tampering.
+  - **Tab 1: User Management (`#panel-user-management`):**
+    - **Create User Card (`#form-create-user`):** Provision new user accounts with Argon2id password hashing, email validation, and role assignment (`user` vs `admin`).
+    - **User Directory Table (`.admin-users-table`):** Lists all registered users with avatar monograms, role badges, and active/disabled status pills.
+    - **Role Switching:** In-place role toggle (`user` <-> `admin`) via `PATCH /api/admin/users/:id/role`.
+    - **Account Disablement & Confirmation Modal (`#btn-confirm-disable`):** Disables target user via `POST /api/admin/users/:id/disable` and immediately terminates all active sessions in memory and MongoDB session stores.
+  - **Tab 2: Activity Feed (`#panel-activity-feed`):**
+    - **Multi-Criteria Filter Card (`#form-filter-activity`):** Query activity logs by user (email or ID), document (name or ID), start date, end date, event type, and outcome status (`SUCCESS`, `DENIED`, `FAILURE`).
+    - **System-Wide Activity Stream Table:** Displays monotonic sequence numbers, timestamps, event types, actions, actors, document names, and truncated SHA-256 hash pointers.
+    - **Rule 4 & Prompt Enforcement:** Strictly metadata only. Zero file contents, zero download links, and zero preview triggers are rendered.
+  - **Tab 3: Permission-Change History (`#panel-permission-history`):**
+    - **Filtered Permission History (`#form-filter-permissions`):** Query historical records of `PERMISSION_GRANT` and `PERMISSION_REVOKE` events filterable by user, document, and date range.
+    - **Permission Modification Table:** Displays timestamp, change type (GRANT vs REVOKE), target user, document name, granted access level (`READ` vs `EDIT`), and initiator actor.
+    - **Rule 4 Enforcement:** Strictly metadata only; no file contents or download links.
+- **Backend Enhancements & Parity (`backend/src/routes/admin.js` & `backend/src/services/adminService.js`):**
+  - Added `GET /admin/users` and `GET /api/admin/users` to return all registered user accounts excluding password hashes.
+  - Enhanced date-range filtering in `adminService.getActivityFeed` to expand `YYYY-MM-DD` end dates to full-day inclusive boundaries (`T23:59:59.999Z`).
+  - Strict metadata sanitization removing `storagePath`, `fileStorageName`, `content`, and any download URL triggers from all audit activity payloads.
+- **Client Routing & Glassmorphic Styling (`client/src/App.jsx` & `client/src/index.css`):**
+  - Added `<Route path="/admin/:tab" element={<ProtectedRoute allowedRoles={['admin']}><AdminPage /></ProtectedRoute>} />`.
+  - Added CSS design tokens and layout classes for `.btn-verify-chain`, `.verify-result-banner` (PASS/FAIL variants), `.admin-tabs-nav`, `.admin-users-table`, `.modal-box-danger`, and `.admin-filter-card`.
+- **Automated Test Coverage (`backend/tests/admin.test.js` & `backend/tests/admin-activity.test.js`):**
+  - 40 tests covering user listing, creation, role modification, immediate session revocation upon disablement, activity stream filtering, permission history, and audit chain verification (219 total passing tests across all 12 test suites).
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `client/src/pages/AdminPage.jsx` | Created | Comprehensive Admin Console implementing User Management, Activity Feed, Permission History, and Verify Audit Chain. |
+| `client/src/App.jsx` | Modified | Mounted `/admin/:tab` with `ProtectedRoute` restricted to role === 'admin'. |
+| `client/src/index.css` | Modified | Added styling for admin tabs, PASS/FAIL banners, user management cards, and filter forms. |
+| `backend/src/routes/admin.js` | Modified | Added `GET /` to list registered users and confirmed session termination logic. |
+| `backend/src/services/adminService.js` | Modified | Improved `YYYY-MM-DD` end date parsing and verified metadata sanitization. |
+| `backend/tests/admin.test.js` | Modified | Added automated integration tests for `GET /admin/users`. |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Separation of Duties (Rule 4: Zero Content Access):**
+  - In a Zero-Trust architecture, administrative privileges are strictly operational (user lifecycle, role assignment, system health, and cryptographic verification). Admins have no legitimate business need to inspect, preview, or download confidential client documents. Enforcing this constraint at both the API layer (omitting storage paths and download endpoints) and UI layer (plain text metadata rendering with zero `<a>` tags or download buttons) eliminates the risk of insider data exfiltration.
+- **Immediate Session Invalidation on Disablement:**
+  - When an administrator disables a user account (e.g. following employee offboarding or suspected credential compromise), simply updating a database flag is insufficient if session tokens remain valid in memory or caches. TrustVault sweeps both the Express memory store and the MongoDB `sessions` collection to immediately purge all active sessions associated with the disabled user.
+- **Anti-Enumeration via 404 (Rule 3):**
+  - Non-admin users who attempt to access `/admin`, `/api/admin/users`, `/api/admin/activity`, or execute `/api/admin/verify-chain` receive `404 Not Found`, never `403 Forbidden`. An attacker cannot even determine whether an administrative endpoint or console exists.
+- **Cryptographic Trust via Cryptographic Ledger Verification:**
+  - Audit logging is useless if logs can be surreptitiously edited in MongoDB. The "Verify audit chain" button gives administrators instantaneous, verifiable mathematical proof that the audit trail is immutable and untampered.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Insider Document Exfiltration by Administrators (Rule 4 / CWE-284):**
+   - Even a compromised admin account cannot download, preview, or view file contents because neither the admin API nor the admin UI provides download links, storage paths, or file contents.
+2. **Administrative Interface Enumeration (Rule 3 / CWE-200):**
+   - Unauthenticated attackers and standard users receive generic `404 Not Found` responses on all admin URLs, preventing reconnaissance and targeted privilege escalation attacks.
+3. **Ghost Session Persistence on Deactivated Accounts (CWE-613):**
+   - Calling `endUserSessions()` upon account disablement immediately destroys all active session records across in-memory and persistent stores, preventing revoked users from executing further requests using existing cookies.
+4. **Silent Log Tampering & Evidence Destruction (CWE-353 / Rule 7):**
+   - If an attacker gains direct database access and modifies or deletes an audit row, the SHA-256 hash pointer chain breaks. The "Verify audit chain" tool instantly flags the tampering as **FAIL** and pinpoints the exact sequence number where the breach occurred.
+5. **Cross-Site Scripting (XSS) via Audit Log Injection (CWE-79):**
+   - All user emails, actions, and document names in the activity stream and permission history are rendered strictly as text nodes in React JSX, preventing malicious strings (e.g. `<script>` tags embedded in filenames) from executing in the administrator's browser.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why must the administrator have zero automatic access to file contents and download links, and how is this enforced at both the API and UI layers?
+**Answer:**
+1. **The Principle of Least Privilege & Separation of Duties:**
+   - System administrators are custodians of the infrastructure, not the data owners. Allowing administrators unfettered access to confidential business documents creates a high-value target for spear-phishing and insider threats. By strictly segregating administrative oversight (user provisioning, audit verification) from document content access, TrustVault enforces true Zero-Trust security.
+2. **API Layer Enforcement:**
+   - The `adminService.getActivityFeed()` function explicitly deletes sensitive properties (`storagePath`, `fileStorageName`, `content`, `downloadUrl`) from all returned records.
+   - The `authorize()` policy engine grants content access only to document owners and users with explicit `Permission` records. The `admin` role confers zero bypass privileges in `authorize()`.
+3. **UI Layer Enforcement:**
+   - In `AdminPage.jsx`, document names are rendered as plain `<span className="doc-metadata-plain">` elements. There are no `<a href="...">` download links, no action buttons that trigger downloads, and no modal dialogs that display file contents.
+
+#### Question 2: How does the "Verify audit chain" feature cryptographically detect tampering or row deletion in the database, and why are SHA-256 hash chains superior to simple timestamps?
+**Answer:**
+1. **The Vulnerability of Simple Timestamps:**
+   - In standard logging systems, logs consist of independent rows with `createdAt` timestamps. If a rogue insider deletes a row or alters a log entry using a database console, there is no mathematical dependency linking adjacent records. The alteration is undetectable unless external off-site logging exists.
+2. **Cryptographic Chaining Mechanics:**
+   - In TrustVault, each `AuditEvent` record computes its SHA-256 hash using its own fields and the hash of the immediately preceding event:
+     $$\text{hash}_n = \text{SHA256}(\text{sequenceNumber}_n + \text{eventType}_n + \text{timestamp}_n + \text{hash}_{n-1})$$
+3. **Tamper Detection via `verifyChain()`:**
+   - When the administrator clicks "Verify audit chain", the server traverses the ledger sequentially from sequence #1 to the latest event, recalculating each row's expected hash and comparing it to `row.hash` and `nextRow.previousHash`.
+   - If a row is modified, its recalculated hash mismatches `row.hash`.
+   - If a row is deleted, the subsequent row's `previousHash` fails to match the prior row's hash.
+   - The verification fails immediately, returns `pass: false`, and reports the exact `brokenSequence` number.
+
+#### Question 3: When an admin disables a user account, why is merely setting `isActive: false` in the database insufficient, and how does TrustVault achieve immediate session revocation?
+**Answer:**
+1. **The Session Persistence Gap:**
+   - In stateful session architectures, session validation often checks the session store first. If the application caches user status or only queries the database on login, an already-authenticated user can continue making requests until their session cookie expires.
+2. **TrustVault's Immediate Dual-Store Invalidation:**
+   - When `POST /admin/users/:id/disable` is invoked:
+     1. It sets `user.isActive = false` in the `User` collection.
+     2. It immediately executes `endUserSessions(req.sessionStore, user._id)`.
+     3. In memory, it iterates through all active sessions and deletes any session matching `session.userId === targetId`.
+     4. In MongoDB, it executes `sessions.deleteMany({ 'session.userId': targetId })`.
+   - If the deactivated user sends another request within milliseconds, the server finds no session, checks credentials, and returns `404 Not Found` per Rule 3.
+
 
 
 

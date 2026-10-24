@@ -97,7 +97,10 @@ async function getActivityFeed(options = {}) {
       if (!isNaN(parsedStart.getTime())) dateFilter.$gte = parsedStart;
     }
     if (end) {
-      const parsedEnd = new Date(end);
+      let parsedEnd = new Date(end);
+      if (typeof end === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(end.trim())) {
+        parsedEnd = new Date(end.trim() + 'T23:59:59.999Z');
+      }
       if (!isNaN(parsedEnd.getTime())) dateFilter.$lte = parsedEnd;
     }
     if (Object.keys(dateFilter).length > 0) {
@@ -227,6 +230,7 @@ async function verifyAuditChain() {
 
   return {
     isValid: Boolean(result.valid),
+    pass: Boolean(result.valid),
     totalEvents: result.count !== undefined ? result.count : (latestEvent ? latestEvent.sequenceNumber : 0),
     verifiedAt: new Date().toISOString(),
     brokenSequence: result.sequenceNumber || null,

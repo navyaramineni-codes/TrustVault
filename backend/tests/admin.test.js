@@ -137,10 +137,41 @@ describe('Admin-Only User Management Routes', () => {
       expect(res.status).toBe(404);
       expect(res.body).toEqual({ error: 'Not Found' });
     });
+
+    it('should return 404 for non-admin user attempting to list users', async () => {
+      const res = await request(app)
+        .get('/admin/users')
+        .set('Cookie', userCookie);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'Not Found' });
+    });
   });
 
   // =========================================================================
-  // 2. ROUTE: CREATE USER (POST /admin/users)
+  // 2. ROUTE: LIST USERS (GET /admin/users)
+  // =========================================================================
+  describe('GET /admin/users (List Users)', () => {
+    it('should allow admin to list all registered users excluding password hashes', async () => {
+      const res = await request(app)
+        .get('/admin/users')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty('users');
+      expect(Array.isArray(res.body.users)).toBe(true);
+      expect(res.body.users.length).toBeGreaterThan(0);
+      for (const u of res.body.users) {
+        expect(u).toHaveProperty('email');
+        expect(u).toHaveProperty('role');
+        expect(u).toHaveProperty('isActive');
+        expect(u.passwordHash).toBeUndefined();
+      }
+    });
+  });
+
+  // =========================================================================
+  // 3. ROUTE: CREATE USER (POST /admin/users)
   // =========================================================================
   describe('POST /admin/users (Create User)', () => {
     it('should allow admin to create a new user with default role "user" and hashed password', async () => {

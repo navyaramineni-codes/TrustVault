@@ -105,6 +105,23 @@ async function requireAdmin(req, res, next) {
 router.use(requireAdmin);
 
 /**
+ * @route   GET /admin/users (and /api/admin/users)
+ * @desc    List all users (metadata only: email, role, isActive, timestamps)
+ * @access  Admin-Only (Non-admins get 404 per Rule 3)
+ */
+router.get('/', async (req, res, next) => {
+  try {
+    const users = await User.find({}).sort({ createdAt: -1 });
+    res.status(200).json({
+      count: users.length,
+      users: users.map((u) => u.toJSON()),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   POST /admin/users
  * @desc    Create a new user with Argon2id hashed password
  * @access  Admin-Only (Non-admins get 404)
