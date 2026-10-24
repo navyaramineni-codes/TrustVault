@@ -48,16 +48,21 @@ export default function SearchPage() {
   const handleDownload = async (docId, fileName) => {
     try {
       const blob = await apiFetch(`/api/documents/${docId}/download`);
+      if (!blob || !(blob instanceof Blob)) {
+        throw new Error('Received invalid or empty file data');
+      }
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = fileName || 'download';
       document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(url);
-      a.remove();
+      setTimeout(() => {
+        window.URL.revokeObjectURL(url);
+        a.remove();
+      }, 500);
     } catch (err) {
-      alert(err.status === 404 ? 'Document not found or unauthorized' : 'Download failed');
+      alert(err.status === 404 ? 'Document not found or unauthorized' : 'Download failed: ' + (err.message || 'Unknown error'));
     }
   };
 

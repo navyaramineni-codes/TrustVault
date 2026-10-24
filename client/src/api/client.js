@@ -126,12 +126,24 @@ export async function apiFetch(endpoint, options = {}) {
     }
   }
 
-  // Handle non-JSON or download responses
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/octet-stream') || contentType.includes('application/pdf')) {
-    if (!response.ok) {
-      throw new ApiError(response.status, { error: 'Failed to download file' });
+  if (!response.ok) {
+    let errData = null;
+    try {
+      errData = await response.json();
+    } catch {
+      errData = null;
     }
+    throw new ApiError(response.status, errData || { error: response.statusText });
+  }
+
+  // Handle non-JSON, file download, or attachment responses
+  const contentDisposition = (response.headers.get('content-disposition') || '').toLowerCase();
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  const isAttachment = contentDisposition.includes('attachment');
+  const isDownloadEndpoint = endpoint.includes('/download');
+  const isNonJsonResponse = !contentType.includes('application/json') && contentType !== '';
+
+  if (isAttachment || isDownloadEndpoint || isNonJsonResponse) {
     return response.blob();
   }
 
@@ -140,10 +152,6 @@ export async function apiFetch(endpoint, options = {}) {
     data = await response.json();
   } catch {
     data = null;
-  }
-
-  if (!response.ok) {
-    throw new ApiError(response.status, data || { error: response.statusText });
   }
 
   return data;
