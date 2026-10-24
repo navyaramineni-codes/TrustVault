@@ -1475,7 +1475,7 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
 ---
 
 ### 1. What Was Built
-- Separated the backend application into a dedicated [`/backend`](file:///c:/Users/jithe/coding/TrustValut/backend) directory, creating clean project boundaries alongside [`/client`](file:///c:/Users/jithe/coding/TrustValut/client).
+- Separated the backend application into a dedicated [`/backend`](file:///c:/Users/jithe/coding/TrustVault/backend) directory, creating clean project boundaries alongside [`/client`](file:///c:/Users/jithe/coding/TrustVault/client).
 - Moved `src/`, `tests/`, `scripts/`, `storage/`, `node_modules/`, `package.json`, `package-lock.json`, `.env`, `.env.example`, and `docker-compose.yml` into `backend/`.
 - Configured root `package.json` with delegation scripts (`npm test`, `npm run dev`, `npm run seed`, `npm start`, `npm run client:dev`, `npm run client:build`) targeting respective directories.
 - Confirmed all 12 test suites (198 tests) pass with zero errors in both `backend/` and via root delegation.
@@ -1489,7 +1489,7 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
 ---
 
 ### 1. What Was Built
-- Built the interactive, high-security **Documents Page** in [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx).
+- Built the interactive, high-security **Documents Page** in [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/DocumentsPage.jsx).
 - Implemented the **Accessible Documents Table** displaying all files the current authenticated user is authorized to access:
   - Columns: **Name** (with original filename and plain-text tag pills), **Category** (with visual badge), **Owner** (populated email or "⭐ You" indicator), and **Date** (localized ISO creation date).
   - Row actions: Secure download via backend route and owner-only soft-delete button.
@@ -1503,20 +1503,20 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
     - **Empty File:** Flags zero-byte files.
     - **Path Traversal:** Flags attempted directory traversal sequences in original filenames.
   - Displays the raw server response alongside helpful remediation guidance.
-- Updated backend upload handling in [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) to accept `name`, `category`, and parsed `tags` from `req.body`.
-- Enhanced [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) to populate `owner.email` in document listings for user-friendly ownership rendering.
-- Polished styling in [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css) adhering strictly to Vanilla CSS, modern dark mode glassmorphism, responsive grid layout, and accessible contrast.
+- Updated backend upload handling in [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/routes/documents.js) to accept `name`, `category`, and parsed `tags` from `req.body`.
+- Enhanced [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/services/documentService.js) to populate `owner.email` in document listings for user-friendly ownership rendering.
+- Polished styling in [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustVault/client/src/index.css) adhering strictly to Vanilla CSS, modern dark mode glassmorphism, responsive grid layout, and accessible contrast.
 
 ---
 
 ### 2. Which Files Were Created / Modified
 | File | Action | Purpose |
 |---|---|---|
-| [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx) | Modified | Document table, inline upload form, and server error categorization logic. |
-| [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css) | Modified | CSS rules for upload card, validation alert box, form grid, tag pills, and table indicators. |
-| [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) | Modified | Forwarded custom `name`, `category`, and `tags` from `req.body` into `documentService.createDocument`. |
-| [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) | Modified | Added `.populate('owner', 'email')` to `listDocuments` so document owner email is available in the UI. |
-| [`docs/BUILD_LOG.md`](file:///c:/Users/jithe/coding/TrustValut/docs/BUILD_LOG.md) | Modified | Appended this technical build log entry. |
+| [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/DocumentsPage.jsx) | Modified | Document table, inline upload form, and server error categorization logic. |
+| [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustVault/client/src/index.css) | Modified | CSS rules for upload card, validation alert box, form grid, tag pills, and table indicators. |
+| [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/routes/documents.js) | Modified | Forwarded custom `name`, `category`, and `tags` from `req.body` into `documentService.createDocument`. |
+| [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/services/documentService.js) | Modified | Added `.populate('owner', 'email')` to `listDocuments` so document owner email is available in the UI. |
+| [`docs/BUILD_LOG.md`](file:///c:/Users/jithe/coding/TrustVault/docs/BUILD_LOG.md) | Modified | Appended this technical build log entry. |
 
 ---
 
@@ -1585,7 +1585,7 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
 ---
 
 ### 1. What Was Built
-- Implemented the full-featured **Document Detail Page** in [`client/src/pages/DocumentDetailPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentDetailPage.jsx).
+- Implemented the full-featured **Document Detail Page** in [`client/src/pages/DocumentDetailPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/DocumentDetailPage.jsx).
 - **Secure File Download:**
   - Integrated high-prominence download hero button executing authenticated requests to `/api/documents/:id/download`.
   - Streams file binaries as browser attachments without ever exposing local storage paths or unauthenticated URLs.
@@ -1600,28 +1600,28 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
   - Accessible modal dialog requiring explicit user confirmation before issuing soft-deletion (`DELETE /api/documents/:id`).
   - Warns the user of the permanent nature of soft-deletion and the immutable audit record creation.
 - **Backend API & Route Harmonization:**
-  - Enhanced `GET /documents/:id` in [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) to compute and attach `permissions: { isOwner, canEdit, canDelete, level }` and `ownerEmail`.
-  - Enhanced `updateDocumentMetadata` in [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) to seamlessly accept both string and array representations of tags.
-  - Added 5 automated integration tests in [`backend/tests/documents.test.js`](file:///c:/Users/jithe/coding/TrustValut/backend/tests/documents.test.js) verifying detail endpoint authorization boundaries.
+  - Enhanced `GET /documents/:id` in [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/routes/documents.js) to compute and attach `permissions: { isOwner, canEdit, canDelete, level }` and `ownerEmail`.
+  - Enhanced `updateDocumentMetadata` in [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/services/documentService.js) to seamlessly accept both string and array representations of tags.
+  - Added 5 automated integration tests in [`backend/tests/documents.test.js`](file:///c:/Users/jithe/coding/TrustVault/backend/tests/documents.test.js) verifying detail endpoint authorization boundaries.
 - **Client Application Wiring & Navigation:**
-  - Added `/documents/:id` route in [`client/src/App.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/App.jsx).
-  - Linked document rows and titles in [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx) and [`client/src/pages/SearchPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/SearchPage.jsx) to the detail page.
-  - Styled with Vanilla CSS in [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css).
+  - Added `/documents/:id` route in [`client/src/App.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/App.jsx).
+  - Linked document rows and titles in [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/DocumentsPage.jsx) and [`client/src/pages/SearchPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/SearchPage.jsx) to the detail page.
+  - Styled with Vanilla CSS in [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustVault/client/src/index.css).
 
 ---
 
 ### 2. Which Files Were Created / Modified
 | File | Action | Purpose |
 |---|---|---|
-| [`client/src/pages/DocumentDetailPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentDetailPage.jsx) | Created | Document detail view with download link, metadata edit form, file replacement, and delete confirmation modal. |
-| [`client/src/App.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/App.jsx) | Modified | Added `/documents/:id` protected route pointing to `DocumentDetailPage`. |
-| [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx) | Modified | Linked document names and added inspect action button to the documents table. |
-| [`client/src/pages/SearchPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/SearchPage.jsx) | Modified | Linked search results to Document Detail page. |
-| [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css) | Modified | Added styling for breadcrumb navigation, cryptographic specs grid, tabs, forms, and delete modal. |
-| [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) | Modified | Added computed permissions (`isOwner`, `canEdit`, `canDelete`, `level`) and `ownerEmail` to `GET /:id`. |
-| [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) | Modified | Supported string and array parsing in `updateDocumentMetadata`. |
-| [`backend/tests/documents.test.js`](file:///c:/Users/jithe/coding/TrustValut/backend/tests/documents.test.js) | Modified | Added 5 integration tests covering owner, edit-viewer, read-viewer, unshared (404), and unauth (401). |
-| [`docs/BUILD_LOG.md`](file:///c:/Users/jithe/coding/TrustValut/docs/BUILD_LOG.md) | Modified | Appended this technical build log entry. |
+| [`client/src/pages/DocumentDetailPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/DocumentDetailPage.jsx) | Created | Document detail view with download link, metadata edit form, file replacement, and delete confirmation modal. |
+| [`client/src/App.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/App.jsx) | Modified | Added `/documents/:id` protected route pointing to `DocumentDetailPage`. |
+| [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/DocumentsPage.jsx) | Modified | Linked document names and added inspect action button to the documents table. |
+| [`client/src/pages/SearchPage.jsx`](file:///c:/Users/jithe/coding/TrustVault/client/src/pages/SearchPage.jsx) | Modified | Linked search results to Document Detail page. |
+| [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustVault/client/src/index.css) | Modified | Added styling for breadcrumb navigation, cryptographic specs grid, tabs, forms, and delete modal. |
+| [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/routes/documents.js) | Modified | Added computed permissions (`isOwner`, `canEdit`, `canDelete`, `level`) and `ownerEmail` to `GET /:id`. |
+| [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustVault/backend/src/services/documentService.js) | Modified | Supported string and array parsing in `updateDocumentMetadata`. |
+| [`backend/tests/documents.test.js`](file:///c:/Users/jithe/coding/TrustVault/backend/tests/documents.test.js) | Modified | Added 5 integration tests covering owner, edit-viewer, read-viewer, unshared (404), and unauth (401). |
+| [`docs/BUILD_LOG.md`](file:///c:/Users/jithe/coding/TrustVault/docs/BUILD_LOG.md) | Modified | Appended this technical build log entry. |
 
 ---
 

@@ -279,7 +279,7 @@ Document.find({
 ```
 
 #### 3. Strict Count Invariance (The 40 vs 3 Test)
-TrustVault's automated test suite includes a strict leakage test in [`backend/tests/search.test.js`](file:///c:/Users/jithe/coding/TrustValut/backend/tests/search.test.js):
+TrustVault's automated test suite includes a strict leakage test in [`backend/tests/search.test.js`](file:///c:/Users/jithe/coding/TrustVault/backend/tests/search.test.js):
 - **Setup:** 40 documents are uploaded containing the word `"Financial"` in their title.
 - **Grants:** User A owns all 40. User B (the viewer) is granted read permission to exactly 3 documents.
 - **Execution:** User B searches for `"Financial"`.
