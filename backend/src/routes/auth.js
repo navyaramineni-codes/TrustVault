@@ -1,7 +1,9 @@
 const express = require('express');
 const { verify } = require('@node-rs/argon2');
+const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { logAuditEvent } = require('../audit');
+const { generateCsrfToken } = require('../config/csrf');
 
 const router = express.Router();
 
@@ -9,11 +11,38 @@ const router = express.Router();
 const DUMMY_ARGON2_HASH = '$argon2id$v=19$m=19456,t=2,p=1$eW91cnNhbHRoZXJlMDAwMA$lXiC7xqtOXOTeFD3LSWLPar60ViSVd3CpspOJlNJabw';
 
 /**
- * @route   POST /auth/login (also mounted at /api/auth/login)
- * @desc    Authenticate user via email and Argon2 password verification, creating an HttpOnly session
+ * Rate limiter on login: 5 attempts per minute
+ */
+const loginRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // 5 attempts per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts, please try again after 1 minute' },
+  statusCode: 429,
+  validate: false,
+  keyGenerator: (req) => {
+    const email = req.body?.email ? String(req.body.email).toLowerCase().trim() : '';
+    return email ? `${req.ip}:${email}` : req.ip;
+  },
+});
+
+/**
+ * @route   GET /auth/csrf-token (also mounted at /api/auth/csrf-token)
+ * @desc    Generate and return double-submit CSRF token and cookie
  * @access  Public
  */
-router.post('/login', async (req, res, next) => {
+router.get('/csrf-token', (req, res) => {
+  const csrfToken = req.csrfToken ? req.csrfToken() : generateCsrfToken(req, res);
+  res.status(200).json({ csrfToken });
+});
+
+/**
+ * @route   POST /auth/login (also mounted at /api/auth/login)
+ * @desc    Authenticate user via email and Argon2 password verification, creating an HttpOnly session
+ * @access  Public (Rate-limited: 5 attempts per minute)
+ */
+router.post('/login', loginRateLimiter, async (req, res, next) => {
   const { email, password } = req.body || {};
 
   if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {

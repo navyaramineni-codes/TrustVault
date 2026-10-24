@@ -67,8 +67,14 @@ async function authorize(user, doc, action) {
   }
 
   // 2. Validate document existence
-  if (!doc || !doc._id || !doc.ownerId) {
+  const docOwner = doc ? (doc.owner || doc.ownerId) : null;
+  if (!doc || !doc._id || !docOwner) {
     return deny(user, doc, action, 'Document not found or missing required ownership metadata');
+  }
+
+  // 2b. Validate document has not been soft-deleted (deleted documents return 404 for everyone)
+  if (doc.deletedAt) {
+    return deny(user, doc, action, 'Document has been deleted');
   }
 
   // 3. Validate user authentication and active account status
@@ -77,7 +83,7 @@ async function authorize(user, doc, action) {
   }
 
   // Extract owner ID (supports both raw ObjectId/string and populated user document)
-  const docOwnerId = doc.ownerId._id || doc.ownerId;
+  const docOwnerId = docOwner._id || docOwner;
   const isOwner = areIdsEqual(user._id, docOwnerId);
 
   // 4. Owner Authorization (Rule 4: Only the owner can delete or grant; owner has full access)

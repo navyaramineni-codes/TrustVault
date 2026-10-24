@@ -59,6 +59,15 @@ const auditEventSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: {},
     },
+    sequenceNumber: {
+      type: Number,
+    },
+    previousHash: {
+      type: String,
+    },
+    hash: {
+      type: String,
+    },
   },
   {
     timestamps: { createdAt: true, updatedAt: false }, // Append-only log: createdAt only
@@ -71,7 +80,8 @@ const auditEventSchema = new mongoose.Schema(
   }
 );
 
-// Timeline query optimization
+// Cryptographic linear sequence and timeline query optimization
+auditEventSchema.index({ sequenceNumber: 1 }, { unique: true });
 auditEventSchema.index({ documentId: 1, timestamp: -1 });
 auditEventSchema.index({ userId: 1, timestamp: -1 });
 auditEventSchema.index({ eventType: 1, status: 1, timestamp: -1 });
@@ -90,12 +100,35 @@ auditEventSchema.pre('updateMany', blockUpdate);
 auditEventSchema.pre('findOneAndUpdate', blockUpdate);
 auditEventSchema.pre('replaceOne', blockUpdate);
 
-// Block updates on individual document instances
-auditEventSchema.pre('save', function (next) {
+// Block updates on individual document instances and compute fallback chain fields
+auditEventSchema.pre('save', async function (next) {
   if (!this.isNew) {
     return next(new Error('Audit records are immutable and cannot be updated.'));
   }
+
+  if (this.sequenceNumber === undefined || this.sequenceNumber === null) {
+    try {
+      const crypto = require('crypto');
+      const last = await this.constructor.findOne().sort({ sequenceNumber: -1 }).select('sequenceNumber hash');
+      this.sequenceNumber = last && typeof last.sequenceNumber === 'number' ? last.sequenceNumber + 1 : 1;
+      this.previousHash = this.previousHash || (last && last.hash ? last.hash : '0'.repeat(64));
+      if (!this.hash) {
+        const canonical = JSON.stringify({
+          sequenceNumber: this.sequenceNumber,
+          timestamp: this.timestamp instanceof Date ? this.timestamp.toISOString() : new Date().toISOString(),
+          eventType: this.eventType,
+          action: this.action,
+          status: this.status,
+        });
+        this.hash = crypto.createHash('sha256').update(`${this.previousHash}:${canonical}`).digest('hex');
+      }
+    } catch (err) {
+      return next(err);
+    }
+  }
+
   next();
 });
 
 module.exports = mongoose.model('AuditEvent', auditEventSchema);
+

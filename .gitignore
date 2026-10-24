@@ -17,6 +17,7 @@ yarn-error.log*
 # File storage outside web root
 storage/
 uploads/
+dist/
 
 # OS artifacts
 .DS_Store

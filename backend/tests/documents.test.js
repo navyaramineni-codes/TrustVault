@@ -273,19 +273,25 @@ describe('Document Lifecycle Management (List, Download, Edit Metadata, Delete) 
   // 3. EDIT METADATA (PATCH /documents/:id)
   // =========================================================================
   describe('PATCH /documents/:id (Edit Document Metadata)', () => {
-    it('should allow document owner to update title and description and record audit event', async () => {
+    it('should allow document owner to update title, name, description, category, and tags and record audit event', async () => {
       const response = await request(app)
         .patch(`/documents/${ownerDoc._id}`)
         .set('Cookie', ownerCookie)
         .send({
+          name: 'Updated Owner Doc Title',
           title: 'Updated Owner Doc Title',
           description: 'Updated Owner Description 2026',
+          category: 'financial',
+          tags: ['q1', 'audit', 'confidential'],
         });
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('document');
+      expect(response.body.document.name).toBe('Updated Owner Doc Title');
       expect(response.body.document.title).toBe('Updated Owner Doc Title');
       expect(response.body.document.description).toBe('Updated Owner Description 2026');
+      expect(response.body.document.category).toBe('financial');
+      expect(response.body.document.tags).toEqual(['q1', 'audit', 'confidential']);
 
       // Verify AuditEvent write
       const auditLog = await AuditEvent.findOne({
@@ -347,26 +353,34 @@ describe('Document Lifecycle Management (List, Download, Edit Metadata, Delete) 
       expect(response.body).toEqual({ error: 'Not Found' });
     });
 
-    it('should prevent tampering with immutable fields (fileStorageName, sha256, ownerId)', async () => {
+    it('should prevent tampering with immutable fields (fileStorageName, storagePath, sha256, ownerId, owner)', async () => {
       const originalStorageName = ownerDoc.fileStorageName;
+      const originalStoragePath = ownerDoc.storagePath;
       const originalSha256 = ownerDoc.sha256;
       const originalOwnerId = ownerDoc.ownerId;
+      const originalOwner = ownerDoc.owner;
 
       const response = await request(app)
         .patch(`/documents/${ownerDoc._id}`)
         .set('Cookie', ownerCookie)
         .send({
+          name: 'Valid New Title',
           title: 'Valid New Title',
           fileStorageName: 'tampered-uuid-5555',
+          storagePath: 'tampered-uuid-5555',
           sha256: '0000000000000000000000000000000000000000000000000000000000000000',
           ownerId: viewerUser._id,
+          owner: viewerUser._id,
         });
 
       expect(response.status).toBe(200);
       expect(response.body.document.title).toBe('Valid New Title');
+      expect(response.body.document.name).toBe('Valid New Title');
       expect(response.body.document.fileStorageName).toBe(originalStorageName);
+      expect(response.body.document.storagePath).toBe(originalStoragePath);
       expect(response.body.document.sha256).toBe(originalSha256);
       expect(response.body.document.ownerId.toString()).toBe(originalOwnerId.toString());
+      expect(response.body.document.owner.toString()).toBe(originalOwner.toString());
     });
 
     it('should reject unauthenticated edit metadata request with 401', async () => {
@@ -412,14 +426,14 @@ describe('Document Lifecycle Management (List, Download, Edit Metadata, Delete) 
       expect(response.body).toEqual({ error: 'Not Found' });
     });
 
-    it('should allow document owner to delete document, removing physical disk file and permissions', async () => {
-      // Create a dedicated doc to delete
+    it('should allow document owner to soft-delete document by setting deletedAt timestamp while retaining record in DB for audit log references', async () => {
+      // Create a dedicated doc to soft-delete
       const docToDelete = await (async () => {
         const res = await request(app)
           .post('/documents/upload')
           .set('Cookie', ownerCookie)
-          .attach('file', SAMPLE_PDF_BUFFER, 'delete_target.pdf')
-          .field('title', 'Target For Deletion');
+          .attach('file', SAMPLE_PDF_BUFFER, 'soft_delete_target.pdf')
+          .field('title', 'Soft Delete Target');
         return res.body.document;
       })();
 
@@ -442,27 +456,238 @@ describe('Document Lifecycle Management (List, Download, Edit Metadata, Delete) 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('message', 'Document deleted successfully');
 
-      // 1. Verify document removed from DB
+      // 1. Verify document is NOT removed from DB, but has deletedAt set as a Date
       const dbDoc = await Document.findById(docToDelete._id);
-      expect(dbDoc).toBeNull();
+      expect(dbDoc).not.toBeNull();
+      expect(dbDoc.deletedAt).toBeInstanceOf(Date);
+      expect(Date.now() - new Date(dbDoc.deletedAt).getTime()).toBeLessThan(10000);
 
-      // 2. Verify physical disk file removed
-      expect(fs.existsSync(filePath)).toBe(false);
-
-      // 3. Verify permissions on this document cleaned up
-      const perms = await Permission.find({ documentId: docToDelete._id });
-      expect(perms).toHaveLength(0);
-
-      // 4. Verify AuditEvent write
+      // 2. Verify AuditEvent write and that audit log can still reference it
       const auditLog = await AuditEvent.findOne({
         eventType: 'DOCUMENT_DELETE',
         documentId: docToDelete._id,
         userId: ownerUser._id,
-      }).sort({ timestamp: -1 });
+      }).populate('documentId');
 
       expect(auditLog).toBeDefined();
       expect(auditLog.status).toBe('SUCCESS');
       expect(auditLog.action).toBe('delete');
+      expect(auditLog.documentId).not.toBeNull();
+      expect(auditLog.documentId._id.toString()).toBe(docToDelete._id.toString());
+      expect(auditLog.documentId.title).toBe('Soft Delete Target');
+      expect(auditLog.documentId.deletedAt).toBeInstanceOf(Date);
+    });
+
+    it('should return 404 for everyone (including owner, viewers, and admin) on every route for a soft-deleted document', async () => {
+      // Create and soft-delete a document
+      const softDoc = await (async () => {
+        const res = await request(app)
+          .post('/documents/upload')
+          .set('Cookie', ownerCookie)
+          .attach('file', SAMPLE_PDF_BUFFER, 'perma_hidden.pdf')
+          .field('title', 'Perma Hidden Doc');
+        return res.body.document;
+      })();
+
+      // Grant edit to viewer
+      await Permission.create({
+        documentId: softDoc._id,
+        userId: viewerUser._id,
+        level: 'edit',
+        grantedBy: ownerUser._id,
+      });
+
+      // Soft delete the document
+      const delRes = await request(app)
+        .delete(`/documents/${softDoc._id}`)
+        .set('Cookie', ownerCookie);
+      expect(delRes.status).toBe(200);
+
+      // 1. GET /:id and GET /:id/download must return 404 for EVERYONE (owner, viewer, admin)
+      const getDocOwner = await request(app)
+        .get(`/documents/${softDoc._id}`)
+        .set('Cookie', ownerCookie);
+      expect(getDocOwner.status).toBe(404);
+      expect(getDocOwner.body).toEqual({ error: 'Not Found' });
+
+      const getDocViewer = await request(app)
+        .get(`/documents/${softDoc._id}`)
+        .set('Cookie', viewerCookie);
+      expect(getDocViewer.status).toBe(404);
+      expect(getDocViewer.body).toEqual({ error: 'Not Found' });
+
+      const getDocAdmin = await request(app)
+        .get(`/documents/${softDoc._id}`)
+        .set('Cookie', adminCookie);
+      expect(getDocAdmin.status).toBe(404);
+      expect(getDocAdmin.body).toEqual({ error: 'Not Found' });
+
+      const downloadOwner = await request(app)
+        .get(`/documents/${softDoc._id}/download`)
+        .set('Cookie', ownerCookie);
+      expect(downloadOwner.status).toBe(404);
+      expect(downloadOwner.body).toEqual({ error: 'Not Found' });
+
+      const downloadViewer = await request(app)
+        .get(`/documents/${softDoc._id}/download`)
+        .set('Cookie', viewerCookie);
+      expect(downloadViewer.status).toBe(404);
+      expect(downloadViewer.body).toEqual({ error: 'Not Found' });
+
+      const downloadAdmin = await request(app)
+        .get(`/documents/${softDoc._id}/download`)
+        .set('Cookie', adminCookie);
+      expect(downloadAdmin.status).toBe(404);
+      expect(downloadAdmin.body).toEqual({ error: 'Not Found' });
+
+      // 2. PATCH /:id must return 404 for EVERYONE
+      const patchOwner = await request(app)
+        .patch(`/documents/${softDoc._id}`)
+        .set('Cookie', ownerCookie)
+        .send({ title: 'New Title Attempt' });
+      expect(patchOwner.status).toBe(404);
+      expect(patchOwner.body).toEqual({ error: 'Not Found' });
+
+      const patchViewer = await request(app)
+        .patch(`/documents/${softDoc._id}`)
+        .set('Cookie', viewerCookie)
+        .send({ title: 'New Title Attempt' });
+      expect(patchViewer.status).toBe(404);
+      expect(patchViewer.body).toEqual({ error: 'Not Found' });
+
+      const patchAdmin = await request(app)
+        .patch(`/documents/${softDoc._id}`)
+        .set('Cookie', adminCookie)
+        .send({ title: 'New Title Attempt' });
+      expect(patchAdmin.status).toBe(404);
+      expect(patchAdmin.body).toEqual({ error: 'Not Found' });
+
+      // 3. PUT /:id must return 404 for EVERYONE
+      const putOwner = await request(app)
+        .put(`/documents/${softDoc._id}`)
+        .set('Cookie', ownerCookie)
+        .send({ title: 'Put Title Attempt' });
+      expect(putOwner.status).toBe(404);
+      expect(putOwner.body).toEqual({ error: 'Not Found' });
+
+      // 4. DELETE /:id on an already soft-deleted document must return 404 for EVERYONE
+      const deleteOwnerAgain = await request(app)
+        .delete(`/documents/${softDoc._id}`)
+        .set('Cookie', ownerCookie);
+      expect(deleteOwnerAgain.status).toBe(404);
+      expect(deleteOwnerAgain.body).toEqual({ error: 'Not Found' });
+
+      const deleteViewer = await request(app)
+        .delete(`/documents/${softDoc._id}`)
+        .set('Cookie', viewerCookie);
+      expect(deleteViewer.status).toBe(404);
+      expect(deleteViewer.body).toEqual({ error: 'Not Found' });
+
+      const deleteAdmin = await request(app)
+        .delete(`/documents/${softDoc._id}`)
+        .set('Cookie', adminCookie);
+      expect(deleteAdmin.status).toBe(404);
+      expect(deleteAdmin.body).toEqual({ error: 'Not Found' });
+    });
+
+    it('should not appear in list or search for any user after being soft-deleted', async () => {
+      // Create a document with a unique searchable keyword
+      const searchDoc = await (async () => {
+        const res = await request(app)
+          .post('/documents/upload')
+          .set('Cookie', ownerCookie)
+          .attach('file', SAMPLE_PDF_BUFFER, 'findme_secret.pdf')
+          .field('title', 'FindMeSecret KeywordDoc');
+        return res.body.document;
+      })();
+
+      // Grant read permission to viewer
+      await Permission.create({
+        documentId: searchDoc._id,
+        userId: viewerUser._id,
+        level: 'read',
+        grantedBy: ownerUser._id,
+      });
+
+      // Verify it appears in list before deletion
+      const listBefore = await request(app)
+        .get('/documents')
+        .set('Cookie', ownerCookie);
+      const idsBefore = listBefore.body.documents.map((d) => d._id.toString());
+      expect(idsBefore).toContain(searchDoc._id.toString());
+
+      // Soft-delete the document
+      await request(app)
+        .delete(`/documents/${searchDoc._id}`)
+        .set('Cookie', ownerCookie);
+
+      // 1. Must not appear in list for owner
+      const listOwner = await request(app)
+        .get('/documents')
+        .set('Cookie', ownerCookie);
+      const ownerIds = listOwner.body.documents.map((d) => d._id.toString());
+      expect(ownerIds).not.toContain(searchDoc._id.toString());
+
+      // 2. Must not appear in list for viewer
+      const listViewer = await request(app)
+        .get('/documents')
+        .set('Cookie', viewerCookie);
+      const viewerIds = listViewer.body.documents.map((d) => d._id.toString());
+      expect(viewerIds).not.toContain(searchDoc._id.toString());
+
+      // 3. Must not appear in search by query parameter for owner
+      const searchOwner = await request(app)
+        .get('/documents?search=FindMeSecret')
+        .set('Cookie', ownerCookie);
+      const searchOwnerIds = (searchOwner.body.documents || []).map((d) => d._id.toString());
+      expect(searchOwnerIds).not.toContain(searchDoc._id.toString());
+
+      // 4. Must not appear in search by dedicated search route for owner
+      const searchRouteOwner = await request(app)
+        .get('/documents/search?q=FindMeSecret')
+        .set('Cookie', ownerCookie);
+      const searchRouteIds = (searchRouteOwner.body.documents || []).map((d) => d._id.toString());
+      expect(searchRouteIds).not.toContain(searchDoc._id.toString());
+
+      // 5. Must not appear in search for viewer
+      const searchViewer = await request(app)
+        .get('/documents?q=FindMeSecret')
+        .set('Cookie', viewerCookie);
+      const searchViewerIds = (searchViewer.body.documents || []).map((d) => d._id.toString());
+      expect(searchViewerIds).not.toContain(searchDoc._id.toString());
+    });
+
+    it('should reject soft-deleted document in authorize() with 404 for all actions and roles', async () => {
+      const softDoc = await Document.create({
+        name: 'Authz Soft Deleted Doc',
+        title: 'Authz Soft Deleted Doc',
+        owner: ownerUser._id,
+        ownerId: ownerUser._id,
+        size: 1024,
+        sizeBytes: 1024,
+        mimeType: 'application/pdf',
+        sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        storagePath: 'soft-del-uuid',
+        fileStorageName: 'soft-del-uuid',
+        deletedAt: new Date(),
+      });
+
+      const { authorize } = require('../src/authz');
+
+      // Test all actions for owner: read, edit, delete, grant
+      for (const act of ['read', 'edit', 'delete', 'grant']) {
+        await expect(authorize(ownerUser, softDoc, act)).rejects.toMatchObject({
+          status: 404,
+        });
+      }
+
+      // Test for viewer and admin
+      await expect(authorize(viewerUser, softDoc, 'read')).rejects.toMatchObject({
+        status: 404,
+      });
+      await expect(authorize(adminUser, softDoc, 'read')).rejects.toMatchObject({
+        status: 404,
+      });
     });
 
     it('should return 404 when attempting to delete non-existent document', async () => {

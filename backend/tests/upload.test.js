@@ -229,11 +229,21 @@ describe('Document Upload Security & 5 Bad Uploads Tests', () => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
       );
 
-      // 2. Verify metadata properties
+      // 2. Verify metadata properties (name, category, tags, owner, size, mimeType, sha256, storagePath, timestamps, deletedAt)
+      expect(doc.name).toBe('Test Upload - Quarterly Financial Report');
+      expect(doc.title).toBe('Test Upload - Quarterly Financial Report');
       expect(doc.originalFileName).toBe('Quarterly_Report_2026.pdf');
+      expect(doc.category).toBe('general');
+      expect(doc.tags).toEqual([]);
       expect(doc.mimeType).toBe('application/pdf');
+      expect(doc.size).toBe(VALID_PDF_BUFFER.length);
       expect(doc.sizeBytes).toBe(VALID_PDF_BUFFER.length);
-      expect(doc.ownerId).toBe(ownerUser._id);
+      expect(doc.owner.toString()).toBe(ownerUser._id.toString());
+      expect(doc.ownerId.toString()).toBe(ownerUser._id.toString());
+      expect(doc.storagePath).toBe(doc.fileStorageName);
+      expect(doc.deletedAt).toBeNull();
+      expect(doc.createdAt).toBeDefined();
+      expect(doc.updatedAt).toBeDefined();
 
       // 3. Verify SHA-256 recording
       expect(doc.sha256).toBe(expectedSha256);

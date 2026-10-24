@@ -192,8 +192,15 @@ async function handleUpload(req, res, next) {
       // Save document record through documentService (Rule 2: Routes never query documents directly)
       const document = await documentService.createDocument({
         user: req.user,
-        title: req.body.title || path.parse(originalName).name || 'Untitled Document',
+        name: req.body.name || req.body.title || path.parse(originalName).name || 'Untitled Document',
+        title: req.body.title || req.body.name || path.parse(originalName).name || 'Untitled Document',
         description: req.body.description || '',
+        category: req.body.category || 'general',
+        tags: Array.isArray(req.body.tags)
+          ? req.body.tags
+          : typeof req.body.tags === 'string'
+            ? req.body.tags.split(',').map((t) => t.trim()).filter(Boolean)
+            : [],
         fileStorageName,
         originalFileName: originalName,
         mimeType: detected.mime,
@@ -220,9 +227,49 @@ async function handleUpload(req, res, next) {
  */
 router.get('/', requireAuth, async (req, res, next) => {
   try {
-    const documents = await documentService.listDocuments(req.user);
+    const documents = await documentService.listDocuments(req.user, req.query);
     res.status(200).json({
+      count: documents.length,
+      total: documents.length,
+      resultCount: documents.length,
       documents: documents.map((doc) => doc.toJSON()),
+      results: documents.map((doc) => doc.toJSON()),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /documents/search (also mounted at /api/documents/search)
+ * @desc    Search documents accessible to requesting user (Rule 6: permission-filtered in DB)
+ * @access  Authenticated
+ */
+router.get('/search', requireAuth, async (req, res, next) => {
+  try {
+    const documents = await documentService.searchDocuments(req.user, req.query);
+    res.status(200).json({
+      count: documents.length,
+      total: documents.length,
+      resultCount: documents.length,
+      documents: documents.map((doc) => doc.toJSON()),
+      results: documents.map((doc) => doc.toJSON()),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /documents/:id
+ * @desc    Get document details by ID through authorize()
+ * @access  Authenticated (authorized via authorize() in documentService)
+ */
+router.get('/:id', requireAuth, async (req, res, next) => {
+  try {
+    const doc = await documentService.getDocumentById(req.user, req.params.id, 'read');
+    res.status(200).json({
+      document: doc.toJSON(),
     });
   } catch (error) {
     next(error);
@@ -281,8 +328,11 @@ router.patch('/:id', requireAuth, async (req, res, next) => {
       req.user,
       req.params.id,
       {
+        name: req.body.name,
         title: req.body.title,
         description: req.body.description,
+        category: req.body.category,
+        tags: req.body.tags,
       },
       { ipAddress: req.ip, userAgent: req.get('User-Agent') }
     );
@@ -306,8 +356,11 @@ router.put('/:id', requireAuth, async (req, res, next) => {
       req.user,
       req.params.id,
       {
+        name: req.body.name,
         title: req.body.title,
         description: req.body.description,
+        category: req.body.category,
+        tags: req.body.tags,
       },
       { ipAddress: req.ip, userAgent: req.get('User-Agent') }
     );
@@ -340,4 +393,203 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
   }
 });
 
+/**
+ * @route   POST /documents/:id/permissions
+ * @desc    Grant or update document permissions (owner only via authorize())
+ * @access  Authenticated (authorized via authorize() in documentService)
+ */
+router.post('/:id/permissions', requireAuth, async (req, res, next) => {
+  try {
+    const result = await documentService.grantPermission(
+      req.user,
+      req.params.id,
+      req.body,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /documents/:id/grant
+ * @desc    Alias for granting permissions
+ */
+router.post('/:id/grant', requireAuth, async (req, res, next) => {
+  try {
+    const result = await documentService.grantPermission(
+      req.user,
+      req.params.id,
+      req.body,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   DELETE /documents/:id/permissions/:userId
+ * @desc    Revoke document permission for a user (owner only via authorize())
+ * @access  Authenticated (authorized via authorize() in documentService)
+ */
+router.delete('/:id/permissions/:userId', requireAuth, async (req, res, next) => {
+  try {
+    const result = await documentService.revokePermission(
+      req.user,
+      req.params.id,
+      req.params.userId,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /documents/:id/revoke
+ * @desc    Alternative alias for revoking document permissions
+ */
+router.post('/:id/revoke', requireAuth, async (req, res, next) => {
+  try {
+    const targetUserId = req.body?.userId || req.query?.userId;
+    const result = await documentService.revokePermission(
+      req.user,
+      req.params.id,
+      targetUserId,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /documents/:id/replace
+ * @desc    Replace a document's physical file with a new file, recording old and new SHA-256
+ * @access  Authenticated (authorized via authorize() in documentService)
+ */
+async function handleFileReplace(req, res, next) {
+  upload.single('file')(req, res, async (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        await logAuditEvent({
+          eventType: 'UPLOAD_FAILED',
+          userId: req.session.userId,
+          action: 'replace',
+          status: 'DENIED',
+          reason: 'File size limit exceeded (maximum 5MB)',
+          ipAddress: req.ip,
+          userAgent: req.get('User-Agent'),
+        });
+        return res.status(400).json({ error: 'File size limit exceeded (maximum 5MB)' });
+      }
+
+      await logAuditEvent({
+        eventType: 'UPLOAD_FAILED',
+        userId: req.session.userId,
+        action: 'replace',
+        status: 'DENIED',
+        reason: err.message,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+      });
+      return res.status(400).json({ error: err.message });
+    }
+
+    if (!req.file || !req.file.buffer || req.file.buffer.length === 0) {
+      await logAuditEvent({
+        eventType: 'UPLOAD_FAILED',
+        userId: req.session.userId,
+        action: 'replace',
+        status: 'DENIED',
+        reason: 'Empty or missing file provided for replacement',
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+      });
+      return res.status(400).json({ error: 'No file provided or file is empty' });
+    }
+
+    const originalName = req.file.originalname || '';
+    if (originalName.includes('..') || originalName.includes('/') || originalName.includes('\\')) {
+      await logAuditEvent({
+        eventType: 'UPLOAD_FAILED',
+        userId: req.session.userId,
+        action: 'replace',
+        status: 'DENIED',
+        reason: 'Path traversal sequence detected in filename',
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata: { attemptedFilename: originalName },
+      });
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+
+    try {
+      const detected = await FileType.fromBuffer(req.file.buffer);
+      if (!detected || !ALLOWED_MIME_TYPES.includes(detected.mime)) {
+        await logAuditEvent({
+          eventType: 'UPLOAD_FAILED',
+          userId: req.session.userId,
+          action: 'replace',
+          status: 'DENIED',
+          reason: `File type not allowed or unrecognized: ${detected ? detected.mime : 'unknown'}`,
+          ipAddress: req.ip,
+          userAgent: req.get('User-Agent'),
+        });
+        return res.status(400).json({ error: 'File type not allowed' });
+      }
+
+      const updatedDoc = await documentService.replaceDocumentFile(
+        req.user,
+        req.params.id,
+        {
+          fileBuffer: req.file.buffer,
+          originalFileName: originalName,
+          mimeType: detected.mime,
+          size: req.file.size,
+        },
+        { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+      );
+
+      res.status(200).json({
+        message: 'File replaced successfully',
+        document: updatedDoc.toJSON(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+}
+
+router.post('/:id/replace', requireAuth, handleFileReplace);
+router.put('/:id/replace', requireAuth, handleFileReplace);
+router.post('/:id/file', requireAuth, handleFileReplace);
+router.put('/:id/file', requireAuth, handleFileReplace);
+
+/**
+ * @route   DELETE /documents/:id/permissions
+ * @desc    Alternative body/query-based revocation endpoint
+ */
+router.delete('/:id/permissions', requireAuth, async (req, res, next) => {
+  try {
+    const targetUserId = req.body?.userId || req.query?.userId;
+    const result = await documentService.revokePermission(
+      req.user,
+      req.params.id,
+      targetUserId,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
+
+

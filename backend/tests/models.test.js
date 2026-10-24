@@ -68,31 +68,46 @@ describe('Mongoose Data Models Validation & Security Constraints', () => {
   });
 
   describe('Document Model', () => {
-    it('should require title, fileStorageName, originalFileName, mimeType, sizeBytes, sha256, and ownerId', () => {
+    it('should validate required fields (name, owner, size, mimeType, sha256, storagePath)', () => {
       const doc = new Document({});
       const error = doc.validateSync();
 
-      expect(error.errors.title).toBeDefined();
-      expect(error.errors.fileStorageName).toBeDefined();
-      expect(error.errors.originalFileName).toBeDefined();
+      expect(error.errors.name).toBeDefined();
+      expect(error.errors.owner).toBeDefined();
+      expect(error.errors.size).toBeDefined();
       expect(error.errors.mimeType).toBeDefined();
-      expect(error.errors.sizeBytes).toBeDefined();
       expect(error.errors.sha256).toBeDefined();
-      expect(error.errors.ownerId).toBeDefined();
+      expect(error.errors.storagePath).toBeDefined();
+    });
+
+    it('should set default values for category, tags, and deletedAt', () => {
+      const doc = new Document({
+        name: 'Report',
+        owner: new mongoose.Types.ObjectId(),
+        size: 1024,
+        mimeType: 'application/pdf',
+        sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        storagePath: 'uuid-1234',
+      });
+
+      expect(doc.validateSync()).toBeUndefined();
+      expect(doc.category).toBe('general');
+      expect(Array.isArray(doc.tags)).toBe(true);
+      expect(doc.tags).toEqual([]);
+      expect(doc.deletedAt).toBeNull();
     });
 
     it('should reject negative file sizes', () => {
       const doc = new Document({
-        title: 'Test Doc 1',
-        fileStorageName: 'uuid-1234',
-        originalFileName: 'report.pdf',
+        name: 'Test Doc 1',
+        storagePath: 'uuid-1234',
         mimeType: 'application/pdf',
-        sizeBytes: -10,
+        size: -10,
         sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-        ownerId: new mongoose.Types.ObjectId(),
+        owner: new mongoose.Types.ObjectId(),
       });
       const error = doc.validateSync();
-      expect(error.errors.sizeBytes).toBeDefined();
+      expect(error.errors.size).toBeDefined();
     });
   });
 
