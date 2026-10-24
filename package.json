@@ -4,7 +4,7 @@
   "description": "TrustVault secure document storage and authorization platform",
   "main": "backend/src/server.js",
   "scripts": {
-    "build": "npm --prefix client install && npm --prefix client run build",
+    "build": "npm --prefix client install --include=dev && npm --prefix client run build",
     "start": "npm --prefix backend start",
     "dev": "npm --prefix backend run dev",
     "seed": "npm --prefix backend run seed",
