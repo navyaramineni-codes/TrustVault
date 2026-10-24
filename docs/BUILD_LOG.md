@@ -1797,6 +1797,123 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
 2. **Enforcement of Rule 4:**
    - TrustVault enforces that administrators have zero automatic access to document contents or document permissions. Admin calls to `GET /documents/:id/permissions` fail with 404 Not Found unless the admin happens to be the document owner.
 
+---
+
+## Build Entry: Documents Page Search Bar & Multi-Criteria Filtering (Name, Owner, Category, Date Range)
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Interactive Search & Multi-Filter Card on Documents Page (`client/src/pages/DocumentsPage.jsx`):**
+  - **Main Hero Search Bar (`#search-query-input`):**
+    - Prominent search input with icon badge and clear button for full-text search across document title, filename, tags, and description.
+  - **Detailed Filter Grid (`.filters-grid-row`):**
+    - **Name Filter (`#filter-name-input`):** Dedicated text filter targeting `name`, `title`, and `originalFileName`.
+    - **Owner Filter (`#filter-owner-input`):** Dedicated text filter supporting full owner email addresses (e.g. `owner@trustvault.local`) and username/email prefixes (e.g. `owner` or `viewer`).
+    - **Category Filter (`#filter-category-select`):** Dropdown selector supporting `All Categories`, `General`, `Financial`, `Legal`, `Technical`, and `Confidential`.
+    - **Date Range Filter (`#filter-start-date` & `#filter-end-date`):** Native HTML5 dark-mode date inputs allowing users to define start and end creation dates.
+  - **Active Filter Counter & Quick Reset:**
+    - Live pill indicator showing the exact number of active filters.
+    - One-click "Reset Filters" / "Clear All" button returning to the full vault view.
+  - **Seamless Search API Integration:**
+    - Calls `GET /api/documents/search` with dynamic query strings (`?q=...&name=...&owner=...&category=...&startDate=...&endDate=...`).
+    - Automatically falls back to `GET /api/documents` when all filters are cleared.
+    - Tailored empty state (`#empty-documents-card`) clearly distinguishing between an empty vault and zero matches for search criteria.
+- **Backend Search Service Enhancements (`backend/src/services/documentService.js`):**
+  - Enhanced owner filtering in `listDocuments` to resolve users by username/email prefix (e.g. `owner` matching `owner@trustvault.local`) as well as exact email and ObjectId.
+  - Added end-of-day expansion (`T23:59:59.999Z`) for `YYYY-MM-DD` formatted `endDate` parameters, ensuring documents created later on the same day are included.
+  - Strict enforcement of Rule 6: all permission filters (`owner: user._id` or `_id: { $in: grantedDocIds }`) and search criteria are evaluated simultaneously inside MongoDB.
+- **Modern Glassmorphic Styling (`client/src/index.css`):**
+  - Added CSS classes for `.search-filter-card`, `.search-hero-input`, `.filters-grid-row`, `.date-range-inputs`, and responsive mobile layouts.
+- **Integration Test Suite Extensions (`backend/tests/search.test.js`):**
+  - Added tests for owner username prefix filtering.
+  - Added multi-criteria test suite verifying that combined name, owner, category, and date range filters return exact matching results while excluding non-matching documents.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `client/src/pages/DocumentsPage.jsx` | Modified | Integrated search bar, 4-way filter grid, active filter pill, and search API calling. |
+| `client/src/index.css` | Modified | Added styling for search card, hero search input, filter grid, date range pickers, and responsive views. |
+| `backend/src/services/documentService.js` | Modified | Enhanced owner resolution by username prefix and full-day date boundary handling. |
+| `backend/tests/search.test.js` | Modified | Added tests for owner name prefix search and multi-criteria combined query filtering. |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Single Page Document Management Experience:**
+  - Rather than requiring users to navigate to a separate search page, integrating search and multi-criteria filtering directly into the primary Documents page allows immediate discovery within the main document table.
+- **Strict Database-Level Zero Information Leakage (Rule 6):**
+  - In a secure document vault, the number of search results must never reveal the existence of documents the user is not authorized to see. Executing search filters strictly inside MongoDB alongside the user's permission clause guarantees that unauthorized documents are never matched, counted, or transferred to Express memory.
+- **Frictionless Filter Resetting:**
+  - Complex multi-criteria filters often yield zero results when over-constrained. Providing prominent "Reset Filters" and "Clear Search" actions allows users to quickly recover without manually erasing each input field.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Side-Channel Information Leakage via Search Counts (CWE-200 / Rule 6):**
+   - Searching for a keyword present in 40 documents where the user has access to only 3 returns a count of 3, never 40. The user cannot deduce how many confidential files exist in the vault.
+2. **Horizontal Privilege Escalation & IDOR via Search (CWE-639 / CWE-284):**
+   - Even if an attacker specifies the exact name, category, or owner of another user's secret document, MongoDB filters it out at the database level.
+3. **NoSQL / Regex Injection (CWE-943):**
+   - All string search criteria (name, owner, category, keywords) have special regex meta-characters (`.*+?^${}()|[]\`) strictly escaped before building MongoDB RegExp queries, preventing query manipulation and catastrophic backtracking (ReDoS).
+4. **Time-Based Boundary Omissions:**
+   - Appending `T23:59:59.999Z` to date-only `endDate` parameters prevents subtle date truncation attacks where newly updated documents on the boundary date are mysteriously omitted.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: How does TrustVault prevent search result count side-channel leaks (Rule 6), and why is post-query filtering in JavaScript a fatal security flaw in multi-tenant vaults?
+**Answer:**
+1. **The Post-Query Filtering Flaw:**
+   - In insecure architectures, developers query the database for all matching documents (e.g. `Document.find({ category: 'legal' })`) and subsequently filter the results in JavaScript: `docs.filter(d => authorize(user, d, 'read'))`.
+   - If the API returns `{ totalCount: docs.length, results: filteredDocs }` or uses pagination offsets based on the raw query count, an unauthorized user can determine exactly how many confidential legal documents exist in the organization.
+2. **Native MongoDB Permission Filtering in TrustVault:**
+   - TrustVault compiles the user's authorization boundary directly into the MongoDB query object:
+     ```javascript
+     const conditions = [
+       { deletedAt: null },
+       { $or: [{ owner: user._id }, { _id: { $in: grantedDocIds } }] },
+       ...searchCriteria
+     ];
+     ```
+   - MongoDB only touches and counts documents that the user is permitted to see. The query count returned is mathematically identical to the accessible result count, leaking zero metadata.
+
+#### Question 2: Why must user-supplied search strings be escaped with a regex sanitizer before being passed to `new RegExp()` in Mongoose queries?
+**Answer:**
+1. **NoSQL Injection and Regular Expression Denial of Service (ReDoS):**
+   - If an unescaped user string containing regex operators (such as `.*`, `(a+)+$`, or `^`) is passed directly to `new RegExp(userString)`, an attacker can craft payloads that cause exponential backtracking, freezing the Node.js event loop and causing a complete denial of service.
+2. **Logic Manipulation:**
+   - An attacker typing `.*` could bypass exact matching constraints or trigger unintended wildcards across index fields.
+3. **TrustVault Defense:**
+   - All text inputs pass through:
+     ```javascript
+     const escaped = str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+     ```
+   - This ensures that characters like `.`, `*`, `+`, `?` are treated as literal text characters rather than regex operators.
+
+#### Question 3: How does the backend ensure that filtering by an owner who does not exist does not inadvertently return all documents?
+**Answer:**
+1. **Fail-Closed Condition Construction:**
+   - If a user filters by `owner=nonexistent_user`, `User.find()` returns an empty array `[]`.
+   - If the code simply skipped adding an owner condition when no user was found, the query would fall through to searching all accessible documents without an owner restriction, confusing the user and producing incorrect results.
+2. **Dummy Match Defense:**
+   - TrustVault explicitly appends a non-matching condition:
+     ```javascript
+     if (resolvedOwnerIds.length > 0) {
+       conditions.push({ $or: [{ owner: { $in: resolvedOwnerIds } }, { ownerId: { $in: resolvedOwnerIds } }] });
+     } else {
+       conditions.push({ _id: new mongoose.Types.ObjectId() });
+     }
+     ```
+   - The query fails closed and safely returns zero results.
+
+
 
 
 

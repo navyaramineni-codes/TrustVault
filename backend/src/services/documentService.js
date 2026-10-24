@@ -187,24 +187,37 @@ async function listDocuments(user, options = {}) {
     });
   }
 
-  // 4. Search by Owner (Email or User ID)
+  // 4. Search by Owner (Email, Username prefix, or User ID)
   const ownerParam = opts.owner || opts.ownerId;
-  if (ownerParam) {
-    let resolvedOwnerId = null;
-    if (typeof ownerParam === 'string' && ownerParam.includes('@')) {
-      const foundUser = await User.findOne({ email: ownerParam.toLowerCase().trim() }).select('_id').lean();
-      resolvedOwnerId = foundUser ? foundUser._id : new mongoose.Types.ObjectId(); // Non-matching dummy if user does not exist
-    } else if (mongoose.Types.ObjectId.isValid(ownerParam)) {
-      resolvedOwnerId = new mongoose.Types.ObjectId(ownerParam);
+  if (ownerParam && typeof ownerParam === 'string' && ownerParam.trim()) {
+    const cleanOwner = ownerParam.toLowerCase().trim();
+    const resolvedOwnerIds = [];
+
+    if (mongoose.Types.ObjectId.isValid(cleanOwner)) {
+      resolvedOwnerIds.push(new mongoose.Types.ObjectId(cleanOwner));
     }
 
-    if (resolvedOwnerId) {
+    const escapedOwner = cleanOwner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matchedUsers = await User.find({
+      email: new RegExp(cleanOwner.includes('@') ? `^${escapedOwner}$` : `^${escapedOwner}(@|$)`, 'i'),
+    }).select('_id').lean();
+
+    matchedUsers.forEach((u) => {
+      if (!resolvedOwnerIds.some((id) => id.equals(u._id))) {
+        resolvedOwnerIds.push(u._id);
+      }
+    });
+
+    if (resolvedOwnerIds.length > 0) {
       conditions.push({
         $or: [
-          { owner: resolvedOwnerId },
-          { ownerId: resolvedOwnerId },
+          { owner: { $in: resolvedOwnerIds } },
+          { ownerId: { $in: resolvedOwnerIds } },
         ],
       });
+    } else {
+      // Specified owner does not exist; match nothing
+      conditions.push({ _id: new mongoose.Types.ObjectId() });
     }
   }
 
@@ -230,8 +243,11 @@ async function listDocuments(user, options = {}) {
       }
     }
     if (endParam) {
-      const parsedEnd = new Date(endParam);
+      let parsedEnd = new Date(endParam);
       if (!isNaN(parsedEnd.getTime())) {
+        if (typeof endParam === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(endParam.trim())) {
+          parsedEnd = new Date(endParam.trim() + 'T23:59:59.999Z');
+        }
         dateFilter.$lte = parsedEnd;
       }
     }

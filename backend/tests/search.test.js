@@ -282,6 +282,17 @@ describe('Document Search & Anti-Leakage Specification', () => {
       expect(docs[0]._id.toString()).toBe(ownerDoc._id.toString());
     });
 
+    it('should search by owner name prefix (?owner=owner)', async () => {
+      const res = await request(app)
+        .get('/documents/search?owner=owner&category=legal')
+        .set('Cookie', viewerCookie);
+
+      expect(res.status).toBe(200);
+      const docs = res.body.documents || res.body.results;
+      expect(docs.length).toBe(1);
+      expect(docs[0]._id.toString()).toBe(ownerDoc._id.toString());
+    });
+
     it('should return 0 results when searching for an owner whose documents are ungranted', async () => {
       const res = await request(app)
         .get(`/documents/search?owner=${otherOwnerUser.email}`)
@@ -456,7 +467,71 @@ describe('Document Search & Anti-Leakage Specification', () => {
   });
 
   // =========================================================================
-  // 6. DB-LEVEL FILTERING PROOF (NEVER FILTERED IN JS AFTER FETCHING)
+  // 6. MULTI-CRITERIA SEARCH (NAME, OWNER, CATEGORY, DATE RANGE COMBINED)
+  // =========================================================================
+  describe('Multi-Criteria Search (Name, Owner, Category, Date Range)', () => {
+    let multiDoc;
+
+    beforeAll(async () => {
+      const uuid = crypto.randomUUID();
+      multiDoc = await Document.create({
+        name: 'OmniFilter Target Document',
+        title: 'OmniFilter Target Document',
+        category: 'financial',
+        owner: ownerUser._id,
+        ownerId: ownerUser._id,
+        storagePath: uuid,
+        fileStorageName: uuid,
+        sha256: crypto.createHash('sha256').update('omni').digest('hex'),
+        mimeType: 'application/pdf',
+        size: 2048,
+        sizeBytes: 2048,
+        createdAt: new Date('2026-04-15T12:00:00Z'),
+        deletedAt: null,
+      });
+
+      await Permission.create({
+        documentId: multiDoc._id,
+        userId: viewerUser._id,
+        level: 'read',
+        grantedBy: ownerUser._id,
+      });
+    });
+
+    it('should successfully match when all filters (name, owner, category, date range) align', async () => {
+      const res = await request(app)
+        .get('/documents/search?name=OmniFilter&owner=owner&category=financial&startDate=2026-04-01&endDate=2026-04-30')
+        .set('Cookie', viewerCookie);
+
+      expect(res.status).toBe(200);
+      const docs = res.body.documents || res.body.results;
+      expect(docs.length).toBe(1);
+      expect(docs[0]._id.toString()).toBe(multiDoc._id.toString());
+    });
+
+    it('should return empty results when category does not match despite other matching filters', async () => {
+      const res = await request(app)
+        .get('/documents/search?name=OmniFilter&owner=owner&category=legal&startDate=2026-04-01&endDate=2026-04-30')
+        .set('Cookie', viewerCookie);
+
+      expect(res.status).toBe(200);
+      const docs = res.body.documents || res.body.results;
+      expect(docs.length).toBe(0);
+    });
+
+    it('should return empty results when date range does not match despite other matching filters', async () => {
+      const res = await request(app)
+        .get('/documents/search?name=OmniFilter&owner=owner&category=financial&startDate=2026-05-01&endDate=2026-05-31')
+        .set('Cookie', viewerCookie);
+
+      expect(res.status).toBe(200);
+      const docs = res.body.documents || res.body.results;
+      expect(docs.length).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // 7. DB-LEVEL FILTERING PROOF (NEVER FILTERED IN JS AFTER FETCHING)
   // =========================================================================
   describe('Verification of DB-Level Filtering Execution', () => {
     it('should construct MongoDB query with permission filter and search criteria at the database layer', async () => {

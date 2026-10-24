@@ -26,6 +26,18 @@ export default function DocumentsPage() {
   const [is404, setIs404] = useState(false);
   const [actionSuccess, setActionSuccess] = useState('');
 
+  // Search Bar & Filter State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterName, setFilterName] = useState('');
+  const [filterOwner, setFilterOwner] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+  const [filterStartDate, setFilterStartDate] = useState('');
+  const [filterEndDate, setFilterEndDate] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState('');
+  const [activeFiltersCount, setActiveFiltersCount] = useState(0);
+
   // Upload Form State
   const [uploadFile, setUploadFile] = useState(null);
   const [docName, setDocName] = useState('');
@@ -53,6 +65,61 @@ export default function DocumentsPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Call Search API with active search bar and filters
+  const handleSearch = async (e) => {
+    if (e) e.preventDefault();
+    setSearchError('');
+    setIsSearching(true);
+
+    try {
+      const params = new URLSearchParams();
+      if (searchQuery.trim()) params.append('q', searchQuery.trim());
+      if (filterName.trim()) params.append('name', filterName.trim());
+      if (filterOwner.trim()) params.append('owner', filterOwner.trim());
+      if (filterCategory) params.append('category', filterCategory);
+      if (filterStartDate) params.append('startDate', filterStartDate);
+      if (filterEndDate) params.append('endDate', filterEndDate);
+
+      const queryString = params.toString();
+      const endpoint = queryString ? `/api/documents/search?${queryString}` : '/api/documents';
+      const data = await apiFetch(endpoint);
+      setDocuments(data.documents || data.results || []);
+      setHasSearched(Boolean(queryString));
+
+      // Calculate count of active filters
+      let count = 0;
+      if (searchQuery.trim()) count++;
+      if (filterName.trim()) count++;
+      if (filterOwner.trim()) count++;
+      if (filterCategory) count++;
+      if (filterStartDate || filterEndDate) count++;
+      setActiveFiltersCount(count);
+    } catch (err) {
+      if (err.status === 404) {
+        setDocuments([]);
+        setHasSearched(true);
+      } else {
+        setSearchError(err.message || 'Failed to search documents');
+      }
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Clear all filters and restore full list
+  const handleClearFilters = async () => {
+    setSearchQuery('');
+    setFilterName('');
+    setFilterOwner('');
+    setFilterCategory('');
+    setFilterStartDate('');
+    setFilterEndDate('');
+    setHasSearched(false);
+    setActiveFiltersCount(0);
+    setSearchError('');
+    await fetchDocuments();
   };
 
   useEffect(() => {
@@ -387,13 +454,208 @@ export default function DocumentsPage() {
       )}
 
       {/* =========================================================================
+         SEARCH BAR & FILTERS SECTION (Search Bar, Name, Owner, Category, Date Range)
+         ========================================================================= */}
+      <div className="search-filter-card" id="search-filter-section">
+        <div className="search-filter-header">
+          <div className="search-filter-title-col">
+            <div className="search-filter-badge">🔍</div>
+            <div>
+              <h2 className="section-title">Search & Filter Documents</h2>
+              <p className="card-subtitle-text">
+                Native permission-isolated search. Filter across name, owner, category, and creation date range.
+              </p>
+            </div>
+          </div>
+          {activeFiltersCount > 0 && (
+            <div className="active-filters-indicator">
+              <span className="badge badge-primary">
+                {activeFiltersCount} Active {activeFiltersCount === 1 ? 'Filter' : 'Filters'}
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleClearFilters}
+                id="btn-clear-filters-header"
+              >
+                Clear All
+              </button>
+            </div>
+          )}
+        </div>
+
+        {searchError && (
+          <div className="alert alert-error" role="alert" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
+            <span>⚠️ {searchError}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSearch} className="search-filter-form" id="form-documents-search">
+          {/* Main Hero Search Bar */}
+          <div className="main-search-bar-row">
+            <div className="search-input-wrapper">
+              <span className="search-icon">🔍</span>
+              <input
+                id="search-query-input"
+                type="text"
+                className="form-input search-hero-input"
+                placeholder="Search keywords, filenames, description, or tags..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  className="search-clear-inline-btn"
+                  onClick={() => setSearchQuery('')}
+                  title="Clear search text"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <button
+              type="submit"
+              className="btn btn-primary btn-search-submit"
+              disabled={isSearching}
+              id="btn-submit-search"
+            >
+              {isSearching ? (
+                <>
+                  <span className="spinner-sm"></span>
+                  <span>Searching...</span>
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                    <circle cx="11" cy="11" r="8" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                  <span>Search Vault</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Detailed Filters Grid: Name, Owner, Category, Date Range */}
+          <div className="filters-grid-row">
+            {/* Filter by Name */}
+            <div className="form-group filter-col">
+              <label className="form-label" htmlFor="filter-name-input">
+                Document Name
+              </label>
+              <input
+                id="filter-name-input"
+                type="text"
+                className="form-input"
+                placeholder="Filter by document name..."
+                value={filterName}
+                onChange={(e) => setFilterName(e.target.value)}
+              />
+            </div>
+
+            {/* Filter by Owner */}
+            <div className="form-group filter-col">
+              <label className="form-label" htmlFor="filter-owner-input">
+                Owner (Name / Email)
+              </label>
+              <input
+                id="filter-owner-input"
+                type="text"
+                className="form-input"
+                placeholder="e.g. owner or viewer..."
+                value={filterOwner}
+                onChange={(e) => setFilterOwner(e.target.value)}
+              />
+            </div>
+
+            {/* Filter by Category */}
+            <div className="form-group filter-col">
+              <label className="form-label" htmlFor="filter-category-select">
+                Category
+              </label>
+              <select
+                id="filter-category-select"
+                className="form-input"
+                value={filterCategory}
+                onChange={(e) => setFilterCategory(e.target.value)}
+              >
+                <option value="">All Categories</option>
+                <option value="general">General</option>
+                <option value="financial">Financial</option>
+                <option value="legal">Legal</option>
+                <option value="technical">Technical</option>
+                <option value="confidential">Confidential</option>
+              </select>
+            </div>
+
+            {/* Filter by Date Range */}
+            <div className="form-group filter-col date-range-col">
+              <label className="form-label">Date Range</label>
+              <div className="date-range-inputs">
+                <input
+                  id="filter-start-date"
+                  type="date"
+                  className="form-input date-input"
+                  value={filterStartDate}
+                  onChange={(e) => setFilterStartDate(e.target.value)}
+                  title="From date"
+                />
+                <span className="date-separator">to</span>
+                <input
+                  id="filter-end-date"
+                  type="date"
+                  className="form-input date-input"
+                  value={filterEndDate}
+                  onChange={(e) => setFilterEndDate(e.target.value)}
+                  title="To date"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Form Actions Footer */}
+          <div className="search-filter-actions">
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={isSearching}
+              id="btn-apply-filters"
+            >
+              Apply Filters
+            </button>
+            {activeFiltersCount > 0 && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleClearFilters}
+                id="btn-reset-filters"
+              >
+                Reset Filters
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+
+      {/* =========================================================================
          ACCESSIBLE DOCUMENTS TABLE SECTION (Name, Category, Owner, Date)
          ========================================================================= */}
       <div className="documents-list-section">
         <div className="section-header-row">
-          <h2 className="section-title">Accessible Documents</h2>
+          <h2 className="section-title">
+            {hasSearched ? 'Search & Filter Results' : 'Accessible Documents'}
+          </h2>
           <span className="results-count-text">
-            Total Available: <strong>{documents.length}</strong>
+            {hasSearched ? (
+              <>
+                Matched: <strong>{documents.length}</strong> {documents.length === 1 ? 'document' : 'documents'}
+              </>
+            ) : (
+              <>
+                Total Available: <strong>{documents.length}</strong>
+              </>
+            )}
           </span>
         </div>
 
@@ -403,18 +665,35 @@ export default function DocumentsPage() {
           </div>
         )}
 
-        {loading ? (
+        {loading || isSearching ? (
           <div className="loading-card">
             <div className="spinner"></div>
-            <p className="loading-text">Loading authorized documents...</p>
+            <p className="loading-text">
+              {isSearching ? 'Executing zero-leakage search query...' : 'Loading authorized documents...'}
+            </p>
           </div>
         ) : documents.length === 0 ? (
-          <div className="empty-state-card">
-            <div className="empty-icon">📂</div>
-            <h3 className="empty-title">No Accessible Documents</h3>
+          <div className="empty-state-card" id="empty-documents-card">
+            <div className="empty-icon">{hasSearched ? '🔍' : '📂'}</div>
+            <h3 className="empty-title">
+              {hasSearched ? 'No Matching Documents Found' : 'No Accessible Documents'}
+            </h3>
             <p className="empty-text">
-              You currently have no documents in your vault. Use the upload form above to add a document, or request permissions from a document owner.
+              {hasSearched
+                ? 'No documents matched your search parameters and filter criteria. Try adjusting or clearing your filters.'
+                : 'You currently have no documents in your vault. Use the upload form above to add a document, or request permissions from a document owner.'}
             </p>
+            {hasSearched && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleClearFilters}
+                style={{ marginTop: '1rem' }}
+                id="btn-clear-search-empty"
+              >
+                Clear Search & Show All Documents
+              </button>
+            )}
           </div>
         ) : (
           <div className="table-wrapper">
