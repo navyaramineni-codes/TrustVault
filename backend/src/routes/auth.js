@@ -33,6 +33,9 @@ const loginRateLimiter = rateLimit({
  * @access  Public
  */
 router.get('/csrf-token', (req, res) => {
+  if (req.session && !req.session.csrfInitiated) {
+    req.session.csrfInitiated = true;
+  }
   const csrfToken = req.csrfToken ? req.csrfToken() : generateCsrfToken(req, res);
   res.status(200).json({ csrfToken });
 });

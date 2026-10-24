@@ -18,7 +18,7 @@ const {
   },
   size: 32,
   ignoredMethods: ['GET', 'HEAD', 'OPTIONS'],
-  getSessionIdentifier: (req) => req.session?.userId?.toString() || req.sessionID || 'anonymous',
+  getSessionIdentifier: (req) => (req.session && req.session.userId ? req.session.userId.toString() : 'anonymous'),
   getCsrfTokenFromRequest: (req) =>
     req.headers['x-csrf-token'] ||
     req.headers['x-xsrf-token'] ||

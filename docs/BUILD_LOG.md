@@ -2110,6 +2110,33 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
    - On page refresh, `AuthContext` makes a single background `GET /api/auth/me` request with `credentials: 'include'`. The server validates the `HttpOnly` cookie and returns user metadata.
    - JavaScript never touches or stores the session secret.
 
+---
+
+## Build Entry: Pre-Authentication CSRF SessionID Mismatch Fix
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Fixed
+- **Root Cause Analysis of `"Invalid or missing CSRF token"` on `/login`:**
+  - With `saveUninitialized: false` in Express session, an unauthenticated client visiting the login page does not have an active session cookie (`trustvault.sid`).
+  - Previously, `backend/src/config/csrf.js` evaluated `getSessionIdentifier: (req) => req.session?.userId?.toString() || req.sessionID || 'anonymous'`.
+  - When the client fetched `GET /api/auth/csrf-token`, Express assigned an ephemeral in-memory `req.sessionID` (e.g. `sess_A`) that was never persisted or set as a cookie because the session was unmodified.
+  - When the client subsequently submitted `POST /api/auth/login`, Express assigned a completely different ephemeral `req.sessionID` (e.g. `sess_B`).
+  - `doubleCsrf` attempted to verify the token (signed with `sess_A`) against `sess_B`, failing validation and returning `403 Forbidden` (`"Invalid or missing CSRF token"`).
+- **The Solution:**
+  1. Updated `getSessionIdentifier` in `backend/src/config/csrf.js` to:
+     ```javascript
+     getSessionIdentifier: (req) => (req.session && req.session.userId ? req.session.userId.toString() : 'anonymous'),
+     ```
+     This binds unauthenticated tokens consistently to `'anonymous'`, ensuring that pre-login CSRF tokens evaluate against `'anonymous'` regardless of ephemeral `sessionID` generation.
+  2. In `backend/src/routes/auth.js`, the `GET /csrf-token` endpoint touches `req.session.csrfInitiated = true`, establishing a persistent session and issuing the session cookie.
+  3. Once authenticated, `req.session.regenerate()` assigns `req.session.userId`, and `login` in `AuthContext.jsx` requests a fresh CSRF token strictly bound to `user._id.toString()`.
+- **Live Verification:**
+  - Verified via direct HTTP and Vite proxy: `POST /api/auth/login` returns `HTTP 200 OK` and `{ message: "Login successful", user: { ... } }`.
+
+
 
 
 
