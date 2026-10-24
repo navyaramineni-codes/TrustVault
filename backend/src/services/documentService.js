@@ -381,8 +381,12 @@ async function updateDocumentMetadata(user, documentId, updates = {}, context = 
     }
   }
 
-  if (updates.tags !== undefined && Array.isArray(updates.tags)) {
-    doc.tags = updates.tags.map((t) => String(t).trim()).filter(Boolean);
+  if (updates.tags !== undefined) {
+    if (Array.isArray(updates.tags)) {
+      doc.tags = updates.tags.map((t) => String(t).trim()).filter(Boolean);
+    } else if (typeof updates.tags === 'string') {
+      doc.tags = updates.tags.split(',').map((t) => t.trim()).filter(Boolean);
+    }
   }
 
   await doc.save();
@@ -456,7 +460,7 @@ async function deleteDocument(user, documentId, context = {}) {
  * @param {Object} context - IP / UserAgent context
  * @returns {Promise<{ message: string, permission: Object }>}
  */
-async function grantPermission(user, documentId, { userId, email, level } = {}, context = {}) {
+async function grantPermission(user, documentId, { userId, email, name, username, user: userParam, level } = {}, context = {}) {
   // Enforce Rule 2: Access via authorize(user, doc, 'grant') - owner-only
   const doc = await getDocumentById(user, documentId, 'grant');
 
@@ -464,18 +468,34 @@ async function grantPermission(user, documentId, { userId, email, level } = {}, 
     throw new BadRequestError('Invalid permission level. Must be "read" or "edit"');
   }
 
+  const identifier = userId || email || name || username || userParam;
+  if (!identifier) {
+    throw new BadRequestError('User identifier (name or email) is required');
+  }
+
   let targetUser;
-  if (userId) {
-    if (!mongoose.Types.ObjectId.isValid(userId)) {
-      throw new NotFoundError('User not found');
-    }
+  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
     targetUser = await User.findById(userId);
-  } else if (email) {
-    targetUser = await User.findOne({ email: String(email).toLowerCase().trim() });
+  }
+
+  if (!targetUser) {
+    const cleanStr = String(identifier).toLowerCase().trim();
+    targetUser = await User.findOne({ email: cleanStr });
+
+    if (!targetUser) {
+      const escaped = cleanStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      targetUser = await User.findOne({ email: new RegExp('^' + escaped + '(@|$)', 'i') });
+    }
   }
 
   if (!targetUser) {
     throw new NotFoundError('User not found');
+  }
+
+  // Prevent granting to document owner
+  const docOwnerId = doc.ownerId || doc.owner;
+  if (docOwnerId && targetUser._id.equals(docOwnerId)) {
+    throw new BadRequestError('Document owner already possesses full access');
   }
 
   const permission = await Permission.findOneAndUpdate(
@@ -507,8 +527,44 @@ async function grantPermission(user, documentId, { userId, email, level } = {}, 
 
   return {
     message: 'Permission granted successfully',
-    permission: permission.toJSON(),
+    permission: {
+      ...permission.toJSON(),
+      email: targetUser.email,
+      name: targetUser.email ? targetUser.email.split('@')[0] : 'User',
+    },
   };
+}
+
+/**
+ * List all active permissions granted on a document.
+ * Enforces Rule 2 (goes through authorize(user, doc, 'grant')) and Rule 4 (only owner can grant/manage permissions).
+ *
+ * @param {Object} user - The authenticated requesting user
+ * @param {string} documentId - The document ID
+ * @returns {Promise<Array<Object>>}
+ */
+async function listDocumentPermissions(user, documentId, context = {}) {
+  // Enforce Rule 2: Access via authorize(user, doc, 'grant') - owner-only
+  const doc = await getDocumentById(user, documentId, 'grant');
+
+  const permissions = await Permission.find({ documentId: doc._id })
+    .populate('userId', 'email role')
+    .sort({ createdAt: -1 });
+
+  return permissions.map((p) => {
+    const pUserId = p.userId?._id ? p.userId._id.toString() : (p.userId ? p.userId.toString() : '');
+    const userEmail = p.userId?.email || 'Unknown User';
+    return {
+      _id: p._id.toString(),
+      userId: pUserId,
+      email: userEmail,
+      name: userEmail.split('@')[0],
+      role: p.userId?.role || 'user',
+      level: p.level,
+      createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
+    };
+  });
 }
 
 /**
@@ -517,7 +573,7 @@ async function grantPermission(user, documentId, { userId, email, level } = {}, 
  *
  * @param {Object} user - The authenticated requesting user
  * @param {string} documentId - The document ID
- * @param {string} targetUserId - The target user ID to revoke
+ * @param {string} targetUserId - The target user ID or email to revoke
  * @param {Object} context - IP / UserAgent context
  * @returns {Promise<{ message: string }>}
  */
@@ -525,13 +581,22 @@ async function revokePermission(user, documentId, targetUserId, context = {}) {
   // Enforce Rule 2: Access via authorize(user, doc, 'grant') - owner-only
   const doc = await getDocumentById(user, documentId, 'grant');
 
-  if (!targetUserId || !mongoose.Types.ObjectId.isValid(targetUserId)) {
+  if (!targetUserId) {
     throw new NotFoundError('User not found');
+  }
+
+  let resolvedUserId = targetUserId;
+  if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
+    const targetUser = await User.findOne({ email: String(targetUserId).toLowerCase().trim() });
+    if (!targetUser) {
+      throw new NotFoundError('User not found');
+    }
+    resolvedUserId = targetUser._id;
   }
 
   await Permission.deleteOne({
     documentId: doc._id,
-    userId: targetUserId,
+    userId: resolvedUserId,
   });
 
   // Rule 7: Every state change writes an audit event
@@ -544,7 +609,7 @@ async function revokePermission(user, documentId, targetUserId, context = {}) {
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: {
-      targetUserId,
+      targetUserId: resolvedUserId.toString(),
     },
   });
 
@@ -628,6 +693,7 @@ module.exports = {
   deleteDocument,
   grantPermission,
   revokePermission,
+  listDocumentPermissions,
   replaceDocumentFile,
 };
 

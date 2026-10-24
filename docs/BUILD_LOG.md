@@ -1576,6 +1576,229 @@ Unsalted or simple salted SHA-256 algorithms can be computed at billions of atte
 3. **TrustVault Defense:**
    - TrustVault strictly forbids `dangerouslySetInnerHTML` throughout the entire codebase, ensuring that even if an attacker manages to store a malicious payload in a document title or tag, it is harmlessly rendered as plain text.
 
+---
+
+## Build Entry: Document Detail Page — Download, Metadata Edit, File Replacement & Delete Confirmation
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- Implemented the full-featured **Document Detail Page** in [`client/src/pages/DocumentDetailPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentDetailPage.jsx).
+- **Secure File Download:**
+  - Integrated high-prominence download hero button executing authenticated requests to `/api/documents/:id/download`.
+  - Streams file binaries as browser attachments without ever exposing local storage paths or unauthenticated URLs.
+- **Permission-Isolated Controls (Strict Rule 4 Enforcement):**
+  - **Edit Form (Metadata & File Replacement):** Rendered **ONLY** if the requesting user is the document owner or has been granted an `'edit'` permission level.
+  - **Delete Button (with Confirmation Modal):** Rendered **ONLY** if the requesting user is the document owner (`permissions.canDelete === true`). Viewers (even with edit grants) and non-owners cannot delete documents.
+  - **Read-Only Access Card:** Rendered when a user has read-only permission (`level: 'read'`), clearly informing them that edit and deletion capabilities are restricted.
+- **Edit Form (Dual Tabs):**
+  - **Tab 1 — Edit Metadata:** Name/title, category selection, tags (comma-separated), and description text area, submitting via `PATCH /api/documents/:id`.
+  - **Tab 2 — File Replacement:** Drag-and-drop replacement file zone submitting via `POST /api/documents/:id/replace`. Automatically captures new SHA-256 digests and displays categorized server validation errors (wrong type, too large, empty file, path traversal).
+- **Delete Confirmation Modal:**
+  - Accessible modal dialog requiring explicit user confirmation before issuing soft-deletion (`DELETE /api/documents/:id`).
+  - Warns the user of the permanent nature of soft-deletion and the immutable audit record creation.
+- **Backend API & Route Harmonization:**
+  - Enhanced `GET /documents/:id` in [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) to compute and attach `permissions: { isOwner, canEdit, canDelete, level }` and `ownerEmail`.
+  - Enhanced `updateDocumentMetadata` in [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) to seamlessly accept both string and array representations of tags.
+  - Added 5 automated integration tests in [`backend/tests/documents.test.js`](file:///c:/Users/jithe/coding/TrustValut/backend/tests/documents.test.js) verifying detail endpoint authorization boundaries.
+- **Client Application Wiring & Navigation:**
+  - Added `/documents/:id` route in [`client/src/App.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/App.jsx).
+  - Linked document rows and titles in [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx) and [`client/src/pages/SearchPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/SearchPage.jsx) to the detail page.
+  - Styled with Vanilla CSS in [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css).
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Action | Purpose |
+|---|---|---|
+| [`client/src/pages/DocumentDetailPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentDetailPage.jsx) | Created | Document detail view with download link, metadata edit form, file replacement, and delete confirmation modal. |
+| [`client/src/App.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/App.jsx) | Modified | Added `/documents/:id` protected route pointing to `DocumentDetailPage`. |
+| [`client/src/pages/DocumentsPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/DocumentsPage.jsx) | Modified | Linked document names and added inspect action button to the documents table. |
+| [`client/src/pages/SearchPage.jsx`](file:///c:/Users/jithe/coding/TrustValut/client/src/pages/SearchPage.jsx) | Modified | Linked search results to Document Detail page. |
+| [`client/src/index.css`](file:///c:/Users/jithe/coding/TrustValut/client/src/index.css) | Modified | Added styling for breadcrumb navigation, cryptographic specs grid, tabs, forms, and delete modal. |
+| [`backend/src/routes/documents.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/routes/documents.js) | Modified | Added computed permissions (`isOwner`, `canEdit`, `canDelete`, `level`) and `ownerEmail` to `GET /:id`. |
+| [`backend/src/services/documentService.js`](file:///c:/Users/jithe/coding/TrustValut/backend/src/services/documentService.js) | Modified | Supported string and array parsing in `updateDocumentMetadata`. |
+| [`backend/tests/documents.test.js`](file:///c:/Users/jithe/coding/TrustValut/backend/tests/documents.test.js) | Modified | Added 5 integration tests covering owner, edit-viewer, read-viewer, unshared (404), and unauth (401). |
+| [`docs/BUILD_LOG.md`](file:///c:/Users/jithe/coding/TrustValut/docs/BUILD_LOG.md) | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Server-Driven Permission Flags with Backend Enforcement:**
+  - While the frontend inspects `permissions.canEdit` and `permissions.canDelete` to selectively render or hide UI controls, the Express backend enforces the actual security policy at the Policy Decision Point via `authorize(user, doc, action)`. Hiding the delete button prevents user confusion, while backend checks guarantee that even a manually forged `DELETE` request from a non-owner returns HTTP 404 and writes an `ACCESS_DENIED` audit event.
+- **Cryptographic Transparency:**
+  - Displaying the computed SHA-256 digest alongside a "Verified" badge allows users to verify cryptographic file integrity against local hashes. When a file is replaced, the new SHA-256 is recalculated, persisted, and recorded alongside the previous hash in the immutable audit log (`FILE_REPLACE`).
+- **Confirmation Modals for Destructive Operations:**
+  - Soft-deleting a document marks `deletedAt` and immediately renders the document inaccessible across all endpoints. Presenting a confirmation modal prevents accidental deletions while clearly communicating that an immutable record of the deletion is sealed into the audit hash chain.
+- **Universal 404 Cloaking:**
+  - If a user attempts to load `/documents/:id` for a document they have no permission to access, Express returns HTTP 404 (per Rule 3). The React application catches this status and immediately renders `NotFoundPage`, preventing attackers from enumerating valid document ObjectIds.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Broken Object-Level Authorization (BOLA / IDOR / CWE-639):**
+   - Both `GET /documents/:id`, `PATCH /documents/:id`, `POST /documents/:id/replace`, and `DELETE /documents/:id` pass through `authorize(user, doc, action)`. Tampering with document IDs in the URL never allows unauthorized access.
+2. **Privilege Escalation via Direct API Calls (CWE-285):**
+   - A viewer with a `'read'` grant cannot edit metadata or replace the physical file; any direct HTTP `PATCH` or `POST /replace` request returns HTTP 404.
+   - A viewer with an `'edit'` grant cannot delete the document; any direct HTTP `DELETE` request returns HTTP 404.
+3. **Cross-Site Request Forgery (CSRF / CWE-352):**
+   - All state-changing requests (`PATCH`, `POST`, `DELETE`) require the custom `x-csrf-token` header validated with HMAC-SHA256 on Express.
+4. **Stored Cross-Site Scripting (XSS / CWE-79):**
+   - Document titles, original filenames, descriptions, and tags are rendered as React plain-text text nodes, completely preventing script injection from malicious document metadata.
+5. **Accidental / Malicious File Tampering Without Audit Trail (CWE-778):**
+   - Every file replacement records both `oldSha256` and `newSha256` into the SHA-256 chained audit trail, ensuring complete non-repudiation.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why should an application combine client-side conditional rendering (e.g., hiding edit/delete buttons) with strict server-side authorization enforcement, and what are the risks of relying on only one?
+**Answer:**
+1. **The Flaw of Client-Side Only Enforcement:**
+   - Any client-side logic (JavaScript, React state, hidden buttons) can be trivially bypassed by an attacker using browser developer tools, proxy tools (e.g. Burp Suite), or raw HTTP clients (`curl`). If the server does not enforce permissions on incoming requests, an attacker can simply issue `DELETE /api/documents/:id` directly and delete unauthorized resources.
+2. **The Flaw of Server-Side Only Enforcement (Poor UX):**
+   - If an application relies solely on server-side rejection without adjusting the UI, users with read-only access are presented with edit forms and delete buttons that will inevitably fail upon submission. This creates frustration and generates excessive error logs.
+3. **The Dual Defense Model:**
+   - TrustVault uses server-computed permission flags (`permissions: { canEdit, canDelete }`) purely to provide an intuitive user experience (hiding actions the user cannot perform). Concurrently, Express enforces `authorize(user, doc, action)` on every state-changing route with zero caching, ensuring absolute security regardless of client behavior.
+
+#### Question 2: In a secure file vault, why must file replacement record both the old and new SHA-256 hashes in an immutable audit chain rather than merely overwriting the file on disk?
+**Answer:**
+1. **Non-Repudiation and Forensic Integrity:**
+   - Overwriting a file without cryptographic history destroys the chain of custody. An attacker or rogue employee could replace a sensitive legal contract with a fraudulent version and claim the altered file was the original upload.
+2. **Audit Hash Chaining in TrustVault:**
+   - When `replaceDocumentFile` executes, it calculates `newSha256` and logs a `FILE_REPLACE` event containing both `oldSha256` and `newSha256` in the event metadata.
+   - Because each audit event stores the SHA-256 hash of the previous event plus its own contents, the replacement event is permanently sealed into the linear chain. Any attempt to alter past file history breaks `verifyChain()`.
+3. **Storage Isolation:**
+   - The new file is stored under a fresh UUID filename in private storage, preventing race conditions or disk caching collisions during replacement.
+
+#### Question 3: How does soft-deletion with 404 response codes fulfill both audit compliance and anti-enumeration requirements?
+**Answer:**
+1. **Compliance through Record Retention:**
+   - Hard-deleting a document row (`Document.findByIdAndDelete()`) would orphan historical audit events referencing that `documentId`. By setting `deletedAt: new Date()`, the document record remains in the database so audit logs can continue referencing its identity and lineage.
+2. **Anti-Enumeration through 404 Cloaking:**
+   - In accordance with Rule 3, once `doc.deletedAt` is populated, `authorize(user, doc, action)` treats the document as non-existent and returns HTTP 404 for all users and all operations.
+   - Attackers probing deleted document IDs receive the exact same 404 response as a non-existent document, preventing information leakage about former document existence.
+
+---
+
+## Build Entry: Document Detail Sharing Panel (Owner-Only Access Management, Name-Based Granting, Revocation & Audit Verification)
+**Date:** 2026-10-24  
+**Author:** Antigravity  
+
+---
+
+### 1. What Was Built
+- **Owner-Exclusive Sharing & Access Control Panel (`client/src/pages/DocumentDetailPage.jsx`):**
+  - Rendered strictly when `permissions.isOwner === true`. Non-owners (including viewers with `read` or `edit` permissions) and administrators never see this panel or any sharing controls.
+  - **Active Access List Table (`#sharing-access-table`):**
+    - Displays all users with active access to the document:
+      - Primary document owner row with non-revocable badge (`⭐ Owner`).
+      - Granted users with avatar initials, name, email address, access level badge (`READ` in cyan or `EDIT` in emerald), and grant timestamp.
+      - Clean empty state when no other users have been granted access.
+  - **Grant Access Form by Name (`#form-grant-permission`):**
+    - Single input field accepting user name, username prefix (e.g. `'viewer'`), or full email (e.g. `'viewer@trustvault.local'`).
+    - Permission level dropdown selector with clear capability labels: `Read (View & Download)` or `Edit (View, Download, Edit & Replace)`.
+    - Real-time inline feedback alerts for grant success (`#grant-success-alert`) and server error rejection (`#grant-error-alert`).
+  - **Inline Revocation Action with Confirmation Modal (`#btn-revoke-*`):**
+    - Dedicated "Revoke" button beside each granted person with danger styling and loading spinner during in-flight network requests.
+    - Confirmation modal dialog requiring explicit confirmation prior to revocation, detailing immediate access termination and audit recording.
+    - Real-time feedback alerts for revocation success (`#revoke-success-alert`) and immediate optimistic removal from the UI table.
+- **Backend API & Service Integration (`backend/src/services/documentService.js` & `backend/src/routes/documents.js`):**
+  - `GET /documents/:id/permissions`:
+    - Secured via `authorize(user, doc, 'grant')` (Rule 4: Owner-only; non-owners receive 404 Not Found per Rule 3).
+    - Populates user email and role from MongoDB, returning an array of active permission records sorted newest first.
+  - `POST /documents/:id/permissions`:
+    - Enforces `authorize(user, doc, 'grant')`.
+    - Resolves target user by exact email match or case-insensitive regex name prefix (`^<name>(@|$)`).
+    - Explicitly blocks document owners from granting permissions to themselves with HTTP 400.
+    - Upserts permission record in MongoDB (`findOneAndUpdate` with `upsert: true`).
+    - Emits `PERMISSION_GRANT` audit event into the linear SHA-256 hash chain with IP address and user-agent metadata.
+  - `DELETE /documents/:id/permissions/:userId`:
+    - Enforces `authorize(user, doc, 'grant')`.
+    - Removes permission record from MongoDB.
+    - Emits `PERMISSION_REVOKE` audit event into the linear SHA-256 hash chain.
+- **Automated Integration Test Suite (`backend/tests/documents.test.js`):**
+  - 10 new integration tests validating listing, granting by name, granting by email, self-grant rejection, non-existent user handling, non-owner rejection (404), revocation flow, immediate access cut-off (404 for download and view), and audit event verification.
+- **Aesthetic Styling (`client/src/index.css`):**
+  - Fully styled using curated Vanilla CSS tokens with dark glassmorphic cards, gradient top borders, avatar badges, level pills, and responsive mobile grid layouts.
+
+---
+
+### 2. Which Files Were Created / Modified
+| File | Status | Purpose |
+|---|---|---|
+| `client/src/pages/DocumentDetailPage.jsx` | Modified | Added owner-only Sharing panel, user access table, grant form by name, revoke buttons, and confirmation modal. |
+| `client/src/index.css` | Modified | Appended CSS classes for sharing card, access list table, avatar badges, level pills, revoke buttons, and responsive grid. |
+| `backend/src/routes/documents.js` | Modified | Exposed `GET /documents/:id/permissions` and provided `permissionsList` in `GET /documents/:id` response without mutating permission shape. |
+| `backend/src/services/documentService.js` | Modified | Implemented `listDocumentPermissions()`, name/email resolution in `grantPermission()`, and self-grant prevention. |
+| `backend/tests/documents.test.js` | Modified | Added 10 tests verifying permissions listing, name-based granting, revocation, and 404 security rules. |
+| `docs/BUILD_LOG.md` | Modified | Appended this technical build log entry. |
+
+---
+
+### 3. Why This Design
+- **Strict Owner-Only Authority (Rule 4):**
+  - Under TrustVault's security model, even viewers with `edit` permissions are strictly prohibited from granting or revoking document permissions. Only the document owner possesses `grant` authority.
+  - By rendering the Sharing panel conditionally on `permissions.isOwner === true` and enforcing `authorize(user, doc, 'grant')` on the Express API, the design achieves complete defense-in-depth.
+- **Name-Based User Resolution with Prefix Matching:**
+  - Users typically think in terms of colleagues' names (e.g., "viewer", "alice") rather than remembering full email domains or raw database ObjectIds. Resolving names against email usernames (`alice` matching `alice@trustvault.local`) provides a frictionless user experience while rejecting non-existent users with clean 404 errors.
+- **Two-Step Revocation Confirmation:**
+  - Revoking access is a critical access control change that immediately cuts off user access and seals an audit record. A confirmation modal prevents accidental button clicks while clearly explaining the forensic implications.
+- **Immediate State Synchronization:**
+  - After granting access, the permissions list is automatically re-fetched to reflect the new state. When revoking, the revoked user is immediately filtered out of the component state, providing instant visual feedback.
+
+---
+
+### 4. What Attacks This Design Prevents
+1. **Unauthorized Access Granting by Viewers (Horizontal Privilege Escalation / CWE-284):**
+   - A malicious user with granted `edit` rights cannot share the document with an accomplice. The Express backend enforces `authorize(user, doc, 'grant')` which throws 404 for non-owners.
+2. **Access Revocation Bypasses (CWE-285):**
+   - Because `authorize()` queries the database at the instant of access, revoking a permission in the Sharing panel immediately cuts off access. Subsequent requests by the revoked user return HTTP 404 immediately.
+3. **Information Disclosure via ACL Probing (CWE-200 / Rule 3):**
+   - Non-owners attempting to inspect the document's access list via `GET /api/documents/:id/permissions` receive HTTP 404 (never 403), preventing them from learning who else has access to the document.
+4. **Self-Granting Ownership Tampering (CWE-269):**
+   - The backend explicitly rejects owners attempting to grant permissions to themselves, preventing corrupted ACL states.
+5. **Cross-Site Request Forgery (CSRF / CWE-352):**
+   - Granting and revoking permissions require custom `x-csrf-token` headers validated with HMAC-SHA256, blocking CSRF attacks from external malicious sites.
+
+---
+
+### 5. Technical Interview Questions & Answers
+
+#### Question 1: Why must access control lists (ACLs) be queryable and manageable strictly by resource owners rather than any user with edit permissions, and how does `authorize()` enforce this separation?
+**Answer:**
+1. **The Principle of Least Privilege and Separation of Duties:**
+   - A user granted `edit` permission is authorized to update content (e.g., fix a typo, replace a financial spreadsheet), but is *not* the owner of the data asset. Granting an editor the authority to manage the ACL would allow them to exfiltrate data by granting access to unauthorized third parties or locking out other authorized users.
+2. **Enforcement in `authorize()`:**
+   - In `backend/src/authz.js`, the action `'grant'` is handled with positive validation:
+     ```javascript
+     if (action === 'grant') {
+       if (isOwner) return true;
+       return deny('Only the owner can grant permissions');
+     }
+     ```
+   - Because `grant` immediately rejects any user who is not the document owner, even viewers with `level === 'edit'` are denied with HTTP 404.
+
+#### Question 2: How does TrustVault guarantee that permission revocations take immediate effect without leaving window-of-vulnerability gaps?
+**Answer:**
+1. **The Token Stale Cache Problem:**
+   - In systems where permissions are embedded in client JWT claims, revoking access in the database does not affect the user until their JWT expires (often minutes or hours later), leaving a dangerous window of vulnerability.
+2. **Dynamic Database Authorization:**
+   - TrustVault does not store document permissions in session cookies or tokens. Every document route passes through `authorize()`, which queries MongoDB (`Permission.findOne({ documentId, userId })`) in real-time.
+   - When the owner clicks "Revoke", the backend executes `Permission.deleteOne()` and commits the deletion to MongoDB.
+   - Any concurrent or subsequent request from the revoked user immediately evaluates `Permission.findOne` to `null` and is rejected with HTTP 404 within milliseconds.
+
+#### Question 3: Why should administrative users without document ownership be blocked from inspecting or managing a document's sharing list?
+**Answer:**
+1. **Confidentiality and Metadata Privacy:**
+   - Learning who has access to a sensitive document (e.g., an internal investigation, whistleblowing report, or merger plan) leaks confidential organizational intelligence even if file contents cannot be read.
+2. **Enforcement of Rule 4:**
+   - TrustVault enforces that administrators have zero automatic access to document contents or document permissions. Admin calls to `GET /documents/:id/permissions` fail with 404 Not Found unless the admin happens to be the document owner.
+
+
+
 
 
 

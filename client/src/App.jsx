@@ -5,6 +5,7 @@ import Navbar from './components/Navbar';
 import ProtectedRoute from './components/ProtectedRoute';
 import LoginPage from './pages/LoginPage';
 import DocumentsPage from './pages/DocumentsPage';
+import DocumentDetailPage from './pages/DocumentDetailPage';
 import UploadPage from './pages/UploadPage';
 import SearchPage from './pages/SearchPage';
 import AdminPage from './pages/AdminPage';
@@ -30,6 +31,14 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <DocumentsPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/documents/:id"
+                element={
+                  <ProtectedRoute>
+                    <DocumentDetailPage />
                   </ProtectedRoute>
                 }
               />

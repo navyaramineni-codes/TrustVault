@@ -270,6 +270,76 @@ describe('Document Lifecycle Management (List, Download, Edit Metadata, Delete) 
   });
 
   // =========================================================================
+  // 2B. GET DOCUMENT DETAIL (GET /documents/:id)
+  // =========================================================================
+  describe('GET /documents/:id (Document Detail & Permission Calculation)', () => {
+    it('should return document detail with owner permissions for document owner', async () => {
+      const response = await request(app)
+        .get(`/documents/${ownerDoc._id}`)
+        .set('Cookie', ownerCookie);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('document');
+      expect(response.body).toHaveProperty('permissions');
+      expect(response.body.document._id.toString()).toBe(ownerDoc._id.toString());
+      expect(response.body.document.ownerEmail).toBe(ownerUser.email);
+      expect(response.body.permissions).toEqual({
+        isOwner: true,
+        canEdit: true,
+        canDelete: true,
+        level: 'owner',
+      });
+    });
+
+    it('should return document detail with edit permissions for viewer granted "edit"', async () => {
+      const response = await request(app)
+        .get(`/documents/${sharedEditDoc._id}`)
+        .set('Cookie', viewerCookie);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('document');
+      expect(response.body.permissions).toEqual({
+        isOwner: false,
+        canEdit: true,
+        canDelete: false,
+        level: 'edit',
+      });
+    });
+
+    it('should return document detail with read-only permissions for viewer granted "read"', async () => {
+      const response = await request(app)
+        .get(`/documents/${sharedReadDoc._id}`)
+        .set('Cookie', viewerCookie);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('document');
+      expect(response.body.permissions).toEqual({
+        isOwner: false,
+        canEdit: false,
+        canDelete: false,
+        level: 'read',
+      });
+    });
+
+    it('should return 404 for viewer attempting to view unshared document detail per Rule 3', async () => {
+      const response = await request(app)
+        .get(`/documents/${unsharedDoc._id}`)
+        .set('Cookie', viewerCookie);
+
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({ error: 'Not Found' });
+    });
+
+    it('should return 401 for unauthenticated request to document detail', async () => {
+      const response = await request(app)
+        .get(`/documents/${ownerDoc._id}`);
+
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: 'Unauthorized' });
+    });
+  });
+
+  // =========================================================================
   // 3. EDIT METADATA (PATCH /documents/:id)
   // =========================================================================
   describe('PATCH /documents/:id (Edit Document Metadata)', () => {
@@ -706,6 +776,195 @@ describe('Document Lifecycle Management (List, Download, Edit Metadata, Delete) 
 
       expect(response.status).toBe(401);
       expect(response.body).toEqual({ error: 'Unauthorized' });
+    });
+  });
+
+  describe('Document Sharing & Permissions Management (Owner Only) via authorize()', () => {
+    let shareDoc;
+
+    beforeEach(async () => {
+      const res = await request(app)
+        .post('/documents/upload')
+        .set('Cookie', ownerCookie)
+        .attach('file', SAMPLE_PDF_BUFFER, 'sharing_test_doc.pdf')
+        .field('title', 'Sharing Test Document');
+      shareDoc = res.body.document;
+    });
+
+    describe('GET /documents/:id/permissions (List Active Permissions)', () => {
+      it('should allow document owner to list active permissions with user email and level', async () => {
+        // Grant read to viewer
+        await Permission.create({
+          documentId: shareDoc._id,
+          userId: viewerUser._id,
+          level: 'read',
+          grantedBy: ownerUser._id,
+        });
+
+        const res = await request(app)
+          .get(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', ownerCookie);
+
+        expect(res.status).toBe(200);
+        expect(res.body).toHaveProperty('count', 1);
+        expect(Array.isArray(res.body.permissions)).toBe(true);
+        expect(res.body.permissions[0].email).toBe(viewerUser.email);
+        expect(res.body.permissions[0].level).toBe('read');
+      });
+
+      it('should return 404 (never 403 per Rule 3 & 4) for non-owner attempting to list permissions', async () => {
+        // Even if viewer has edit permission on doc, listing ACL is owner-only
+        await Permission.create({
+          documentId: shareDoc._id,
+          userId: viewerUser._id,
+          level: 'edit',
+          grantedBy: ownerUser._id,
+        });
+
+        const res = await request(app)
+          .get(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', viewerCookie);
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ error: 'Not Found' });
+      });
+
+      it('should return 404 for admin attempting to list permissions on unowned doc', async () => {
+        const res = await request(app)
+          .get(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ error: 'Not Found' });
+      });
+    });
+
+    describe('POST /documents/:id/permissions (Grant Access by Name or Email)', () => {
+      it('should allow owner to grant "read" access by username prefix ("viewer")', async () => {
+        const res = await request(app)
+          .post(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', ownerCookie)
+          .send({ name: 'viewer', level: 'read' });
+
+        expect(res.status).toBe(200);
+        expect(res.body.message).toContain('Permission granted');
+        expect(res.body.permission.level).toBe('read');
+        expect(res.body.permission.email).toBe(viewerUser.email);
+
+        // Verify viewer can now download the doc
+        const dlRes = await request(app)
+          .get(`/documents/${shareDoc._id}/download`)
+          .set('Cookie', viewerCookie);
+        expect(dlRes.status).toBe(200);
+
+        // Verify audit event
+        const audit = await AuditEvent.findOne({
+          documentId: shareDoc._id,
+          eventType: 'PERMISSION_GRANT',
+        });
+        expect(audit).not.toBeNull();
+        expect(audit.status).toBe('SUCCESS');
+      });
+
+      it('should allow owner to grant "edit" access by full email address', async () => {
+        const res = await request(app)
+          .post(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', ownerCookie)
+          .send({ name: viewerUser.email, level: 'edit' });
+
+        expect(res.status).toBe(200);
+        expect(res.body.permission.level).toBe('edit');
+
+        // Verify viewer can now edit metadata
+        const patchRes = await request(app)
+          .patch(`/documents/${shareDoc._id}`)
+          .set('Cookie', viewerCookie)
+          .send({ title: 'Updated by Granted Viewer' });
+        expect(patchRes.status).toBe(200);
+      });
+
+      it('should reject granting access to the document owner with 400', async () => {
+        const res = await request(app)
+          .post(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', ownerCookie)
+          .send({ name: ownerUser.email, level: 'edit' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('owner');
+      });
+
+      it('should return 404 when target user name/email does not exist', async () => {
+        const res = await request(app)
+          .post(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', ownerCookie)
+          .send({ name: 'nonexistent_user_9999', level: 'read' });
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toMatch(/not found/i);
+      });
+
+      it('should return 404 for viewer attempting to grant permissions (Rule 4: grant always denied to viewers)', async () => {
+        const res = await request(app)
+          .post(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', viewerCookie)
+          .send({ name: 'admin', level: 'read' });
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ error: 'Not Found' });
+      });
+    });
+
+    describe('DELETE /documents/:id/permissions/:userId (Revoke Access)', () => {
+      it('should allow owner to revoke permission and immediately cut off access', async () => {
+        // First grant access
+        await request(app)
+          .post(`/documents/${shareDoc._id}/permissions`)
+          .set('Cookie', ownerCookie)
+          .send({ name: viewerUser.email, level: 'read' });
+
+        // Verify access works
+        const checkBefore = await request(app)
+          .get(`/documents/${shareDoc._id}`)
+          .set('Cookie', viewerCookie);
+        expect(checkBefore.status).toBe(200);
+
+        // Revoke access
+        const revokeRes = await request(app)
+          .delete(`/documents/${shareDoc._id}/permissions/${viewerUser._id}`)
+          .set('Cookie', ownerCookie);
+
+        expect(revokeRes.status).toBe(200);
+        expect(revokeRes.body.message).toContain('revoked');
+
+        // Verify access is immediately denied with 404
+        const checkAfter = await request(app)
+          .get(`/documents/${shareDoc._id}`)
+          .set('Cookie', viewerCookie);
+        expect(checkAfter.status).toBe(404);
+
+        // Verify download is denied with 404
+        const dlAfter = await request(app)
+          .get(`/documents/${shareDoc._id}/download`)
+          .set('Cookie', viewerCookie);
+        expect(dlAfter.status).toBe(404);
+
+        // Verify audit event
+        const audit = await AuditEvent.findOne({
+          documentId: shareDoc._id,
+          eventType: 'PERMISSION_REVOKE',
+        });
+        expect(audit).not.toBeNull();
+        expect(audit.status).toBe('SUCCESS');
+      });
+
+      it('should return 404 for viewer attempting to revoke permissions', async () => {
+        const res = await request(app)
+          .delete(`/documents/${shareDoc._id}/permissions/${viewerUser._id}`)
+          .set('Cookie', viewerCookie);
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ error: 'Not Found' });
+      });
     });
   });
 });

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
 import NotFoundPage from './NotFoundPage';
 
@@ -140,7 +141,9 @@ export default function SearchPage() {
                         <div className="doc-title-cell">
                           <span className="doc-icon">📄</span>
                           <div>
-                            <div className="doc-title-text">{doc.title || doc.name}</div>
+                            <Link to={`/documents/${doc._id}`} className="doc-title-link">
+                              {doc.title || doc.name}
+                            </Link>
                             <div className="doc-meta-sub">{doc.originalFileName}</div>
                           </div>
                         </div>
@@ -152,18 +155,31 @@ export default function SearchPage() {
                         {doc.size ? `${(doc.size / 1024).toFixed(1)} KB` : 'N/A'}
                       </td>
                       <td>
-                        <button
-                          type="button"
-                          className="btn-icon btn-download"
-                          onClick={() => handleDownload(doc._id, doc.originalFileName || doc.name)}
-                          title="Download document"
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                            <polyline points="7 10 12 15 17 10" />
-                            <line x1="12" y1="15" x2="12" y2="3" />
-                          </svg>
-                        </button>
+                        <div className="action-buttons-cell">
+                          <Link
+                            to={`/documents/${doc._id}`}
+                            className="btn-icon btn-detail"
+                            title="Inspect details, edit metadata or replace file"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                              <circle cx="12" cy="12" r="3" />
+                            </svg>
+                          </Link>
+
+                          <button
+                            type="button"
+                            className="btn-icon btn-download"
+                            onClick={() => handleDownload(doc._id, doc.originalFileName || doc.name)}
+                            title="Download document"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                              <polyline points="7 10 12 15 17 10" />
+                              <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

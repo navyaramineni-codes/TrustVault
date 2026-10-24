@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const FileType = require('file-type');
-const { User } = require('../models');
+const { User, Permission } = require('../models');
 const { logAuditEvent } = require('../audit');
 const documentService = require('../services/documentService');
 
@@ -268,8 +268,40 @@ router.get('/search', requireAuth, async (req, res, next) => {
 router.get('/:id', requireAuth, async (req, res, next) => {
   try {
     const doc = await documentService.getDocumentById(req.user, req.params.id, 'read');
+
+    // Calculate user permissions for UI visibility controls
+    const ownerId = doc.owner?._id || doc.owner || doc.ownerId;
+    const isOwner = String(ownerId) === String(req.user._id);
+    let canEdit = isOwner;
+    let canDelete = isOwner;
+    let permissionLevel = isOwner ? 'owner' : 'read';
+
+    if (!isOwner) {
+      const grant = await Permission.findOne({ documentId: doc._id, userId: req.user._id });
+      if (grant && grant.level === 'edit') {
+        canEdit = true;
+        permissionLevel = 'edit';
+      }
+    }
+
+    const ownerUser = await User.findById(ownerId).select('email');
+    let permissionsList = [];
+    if (isOwner) {
+      permissionsList = await documentService.listDocumentPermissions(req.user, doc._id);
+    }
+
     res.status(200).json({
-      document: doc.toJSON(),
+      document: {
+        ...doc.toJSON(),
+        ownerEmail: ownerUser?.email,
+      },
+      permissions: {
+        isOwner,
+        canEdit,
+        canDelete,
+        level: permissionLevel,
+      },
+      permissionsList: isOwner ? permissionsList : [],
     });
   } catch (error) {
     next(error);
@@ -388,6 +420,27 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
     );
 
     res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /documents/:id/permissions
+ * @desc    List all granted permissions on a document (owner only via authorize())
+ * @access  Authenticated (authorized via authorize() in documentService - owner only)
+ */
+router.get('/:id/permissions', requireAuth, async (req, res, next) => {
+  try {
+    const permissions = await documentService.listDocumentPermissions(
+      req.user,
+      req.params.id,
+      { ipAddress: req.ip, userAgent: req.get('User-Agent') }
+    );
+    res.status(200).json({
+      count: permissions.length,
+      permissions,
+    });
   } catch (error) {
     next(error);
   }

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { apiFetch, ApiError } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import NotFoundPage from './NotFoundPage';
@@ -441,7 +442,9 @@ export default function DocumentsPage() {
                         <div className="doc-title-cell">
                           <span className="doc-icon">📄</span>
                           <div>
-                            <div className="doc-title-text">{doc.name || doc.title}</div>
+                            <Link to={`/documents/${doc._id}`} className="doc-title-link">
+                              {doc.name || doc.title}
+                            </Link>
                             <div className="doc-meta-sub">{doc.originalFileName}</div>
                             {/* Tags list */}
                             {Array.isArray(doc.tags) && doc.tags.length > 0 && (
@@ -485,6 +488,17 @@ export default function DocumentsPage() {
                       {/* Actions */}
                       <td>
                         <div className="action-buttons-cell">
+                          <Link
+                            to={`/documents/${doc._id}`}
+                            className="btn-icon btn-detail"
+                            title="Inspect details, edit metadata or replace file"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                              <circle cx="12" cy="12" r="3" />
+                            </svg>
+                          </Link>
+
                           <button
                             type="button"
                             className="btn-icon btn-download"
