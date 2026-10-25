@@ -89,11 +89,15 @@ export async function apiFetch(endpoint, options = {}) {
     }
   }
 
-  // Format body as JSON unless it is FormData
+  // Format body as JSON unless it is FormData or Blob
   let body = options.body;
-  if (body && typeof body === 'object' && !(body instanceof FormData) && !(body instanceof Blob)) {
-    headers.set('Content-Type', 'application/json');
-    body = JSON.stringify(body);
+  if (body && !(body instanceof FormData) && !(body instanceof Blob)) {
+    if (!headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+    if (typeof body === 'object') {
+      body = JSON.stringify(body);
+    }
   }
 
   const fetchOptions = {

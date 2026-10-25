@@ -320,10 +320,11 @@ export default function DocumentDetailPage() {
     try {
       const res = await apiFetch(`/api/documents/${id}/permissions`, {
         method: 'POST',
-        body: JSON.stringify({
+        headers: { 'Content-Type': 'application/json' },
+        body: {
           name: trimmed,
           level: grantLevel,
-        }),
+        },
       });
 
       setGrantSuccess(res.message || `Access successfully granted to "${trimmed}" (${grantLevel.toUpperCase()}).`);
@@ -334,7 +335,7 @@ export default function DocumentDetailPage() {
       if (err.status === 404) {
         setGrantError(`User "${trimmed}" not found. Please verify the name or email.`);
       } else {
-        setGrantError(err.message || 'Failed to grant permission.');
+        setGrantError(err.data?.error || err.message || 'Failed to grant permission.');
       }
     } finally {
       setIsGranting(false);

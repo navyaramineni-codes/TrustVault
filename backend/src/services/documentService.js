@@ -525,7 +525,8 @@ async function grantPermission(user, documentId, { userId, email, name, username
   // Enforce Rule 2: Access via authorize(user, doc, 'grant') - owner-only
   const doc = await getDocumentById(user, documentId, 'grant');
 
-  if (!level || !['read', 'edit'].includes(level)) {
+  const permLevel = String(level || '').toLowerCase().trim();
+  if (!permLevel || !['read', 'edit'].includes(permLevel)) {
     throw new BadRequestError('Invalid permission level. Must be "read" or "edit"');
   }
 
@@ -564,7 +565,7 @@ async function grantPermission(user, documentId, { userId, email, name, username
     {
       documentId: doc._id,
       userId: targetUser._id,
-      level,
+      level: permLevel,
       grantedBy: user._id,
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
