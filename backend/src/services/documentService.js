@@ -49,6 +49,24 @@ async function denyAndThrow(user, documentId, action, reason) {
 }
 
 /**
+ * Persists file binary into MongoDB GridFS bucket for cloud container persistence.
+ */
+async function saveToGridFS(filename, buffer, metadata = {}) {
+  try {
+    if (!mongoose.connection || !mongoose.connection.db) return;
+    const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'document_files' });
+    const uploadStream = bucket.openUploadStream(filename, { metadata });
+    await new Promise((resolve, reject) => {
+      uploadStream.on('finish', resolve);
+      uploadStream.on('error', reject);
+      uploadStream.end(buffer);
+    });
+  } catch (err) {
+    console.warn('[GridFS] Backup note:', err.message);
+  }
+}
+
+/**
  * Retrieve a document by ID and verify authorization for the requested action.
  * Fulfills Rule 2: "Every document access goes through authorize(user, doc, action) in src/authz.js.
  * Routes never query the documents collection directly."
@@ -309,11 +327,38 @@ async function searchDocuments(user, criteria) {
 async function getDownloadStream(user, documentId, context = {}) {
   const doc = await getDocumentById(user, documentId, 'read');
 
-  const filePath = path.join(STORAGE_DIR, doc.storagePath || doc.fileStorageName);
+  const fileName = doc.storagePath || doc.fileStorageName;
+  const filePath = path.join(STORAGE_DIR, fileName);
 
+  let fileAvailable = false;
   try {
     await fs.promises.access(filePath, fs.constants.R_OK);
+    fileAvailable = true;
   } catch {
+    // If not found on local disk (e.g. Render cloud container restart/redeploy),
+    // attempt self-healing restoration from MongoDB GridFS
+    try {
+      if (mongoose.connection && mongoose.connection.db) {
+        const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'document_files' });
+        const matchingFiles = await bucket.find({ filename: fileName }).toArray();
+        if (matchingFiles.length > 0) {
+          await fs.promises.mkdir(STORAGE_DIR, { recursive: true });
+          const downloadStream = bucket.openDownloadStreamByName(fileName);
+          await new Promise((resolve, reject) => {
+            const writeStream = fs.createWriteStream(filePath);
+            downloadStream.pipe(writeStream);
+            writeStream.on('finish', resolve);
+            writeStream.on('error', reject);
+          });
+          fileAvailable = true;
+        }
+      }
+    } catch (gridFsErr) {
+      console.warn('[Storage] GridFS restore note:', gridFsErr.message);
+    }
+  }
+
+  if (!fileAvailable) {
     await logAuditEvent({
       eventType: 'DOWNLOAD_FAILED',
       userId: user._id,
@@ -659,6 +704,13 @@ async function replaceDocumentFile(user, documentId, { fileBuffer, originalFileN
   const targetPath = path.join(STORAGE_DIR, newFileStorageName);
   await fs.promises.writeFile(targetPath, fileBuffer);
 
+  // Backup replacement file to GridFS
+  await saveToGridFS(newFileStorageName, fileBuffer, {
+    documentId: doc._id,
+    mimeType: mimeType || doc.mimeType,
+    sha256: newSha256,
+  });
+
   // Update document properties
   const oldFileName = doc.originalFileName;
   doc.fileStorageName = newFileStorageName;
@@ -711,5 +763,6 @@ module.exports = {
   revokePermission,
   listDocumentPermissions,
   replaceDocumentFile,
+  saveToGridFS,
 };
 

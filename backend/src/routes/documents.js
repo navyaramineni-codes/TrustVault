@@ -189,6 +189,13 @@ async function handleUpload(req, res, next) {
       const targetPath = path.join(STORAGE_DIR, fileStorageName);
       await fs.promises.writeFile(targetPath, req.file.buffer);
 
+      // Persist binary into MongoDB GridFS for persistent cloud storage across container redeployments
+      await documentService.saveToGridFS(fileStorageName, req.file.buffer, {
+        mimeType: detected.mime,
+        originalFileName: originalName,
+        sha256,
+      });
+
       // Save document record through documentService (Rule 2: Routes never query documents directly)
       const document = await documentService.createDocument({
         user: req.user,

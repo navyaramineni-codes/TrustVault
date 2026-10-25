@@ -245,7 +245,9 @@ export default function DocumentsPage() {
       }, 500);
     } catch (err) {
       if (err.status === 404) {
-        alert('File could not be downloaded: not found or access denied.');
+        alert(err.data?.error === 'File not found on storage'
+          ? 'File not found on storage. (If uploaded in an earlier container before persistent storage was enabled, please re-upload this document).'
+          : 'File could not be downloaded: not found or access denied.');
       } else {
         alert('Download error: ' + (err.message || 'Failed to download'));
       }
